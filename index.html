@@ -95,21 +95,21 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
 const MODES = [
-  { id: 'height',           label: 'Building Height (raw)',        desc: 'Actual measured height. 1m = 1mm.' },
-  { id: 'age',              label: 'Building Age',                 desc: 'Older buildings = taller. S46 before=25mm, S57-H1=12mm, H2+=6mm.' },
-  { id: 'structure',        label: 'Structure (Wood)',             desc: 'Wooden=22mm, RC/Steel=5mm. Highlights wooden building density.' },
-  { id: 'fireproof',        label: 'Fire Resistance',             desc: 'Non-fireproof=25mm, Semi=14mm, Fireproof=4mm.' },
-  { id: 'wooden_old',       label: 'Aging Risk (Wood x Age)',     desc: 'Composite of wooden structure and age. Max 29mm.' },
-  { id: 'flood_depth',      label: 'River Flood Depth',           desc: 'Deeper flooding = taller. 1m depth = 12mm.' },
-  { id: 'hightide',         label: 'High Tide Depth',             desc: 'Storm surge flood depth x5.5.' },
-  { id: 'flood_combined',   label: 'Flood Combined',              desc: 'Max of river flood and high tide depth.' },
-  { id: 'roof_area',        label: 'Roof Area',                   desc: 'Larger roof = taller. sqrt compression. Factories stand out.' },
-  { id: 'usage',            label: 'Building Usage',              desc: 'Business=28mm, Commercial=22mm, Residential=6mm.' },
-  { id: 'floor_area_rate',  label: 'Floor Area Ratio',            desc: 'Higher FAR = taller. 200%=8mm, 500%=20mm.' },
-  { id: 'storeys',          label: 'Number of Floors',            desc: '1 floor = 2.5mm. 12F=30mm cap.' },
-  { id: 'shelter_distance', label: 'Shelter Distance',            desc: 'Farther from shelter = taller. 300m=10mm, 600m=21mm.' },
-  { id: 'landprice',        label: 'Land Price',                  desc: 'Higher price = taller. Log scale. Data: L01 2025.' },
-  { id: 'population',       label: 'Population Density',          desc: '500m mesh population density. 25000/km2 = 17mm.' },
+  { id: 'height',           label: '建物高さ（実測値）&Building Height (raw)',               desc: 'Actual measured height. 1m = 1mm.' },
+  { id: 'age',              label: '築年数（古いほど高い）&Building Age',                    desc: 'Older buildings = taller. S46 before=25mm, S57-H1=12mm, H2+=6mm.' },
+  { id: 'structure',        label: '構造（木造ほど高い）&Structure (Wood)',                  desc: 'Wooden=22mm, RC/Steel=5mm. Highlights wooden building density.' },
+  { id: 'fireproof',        label: '耐火構造（非耐火ほど高い）&Fire Resistance',             desc: 'Non-fireproof=25mm, Semi=14mm, Fireproof=4mm.' },
+  { id: 'wooden_old',       label: '老朽化（木造×築古の複合スコア）&Aging Risk (Wood x Age)', desc: 'Composite of wooden structure and age. Max 29mm.' },
+  { id: 'flood_depth',      label: '河川浸水深&River Flood Depth',                           desc: 'Deeper flooding = taller. 1m depth = 12mm.' },
+  { id: 'hightide',         label: '高潮浸水深&High Tide Depth',                             desc: 'Storm surge flood depth x5.5.' },
+  { id: 'flood_combined',   label: '水害総合（河川+高潮MAX）&Flood Combined',                desc: 'Max of river flood and high tide depth.' },
+  { id: 'roof_area',        label: '屋根面積&Roof Area',                                     desc: 'Larger roof = taller. sqrt compression. Factories stand out.' },
+  { id: 'usage',            label: '用途（業務/商業/住宅）&Building Usage',                  desc: 'Business=28mm, Commercial=22mm, Residential=6mm.' },
+  { id: 'floor_area_rate',  label: '容積率&Floor Area Ratio',                                desc: 'Higher FAR = taller. 200%=8mm, 500%=20mm.' },
+  { id: 'storeys',          label: '階数&Number of Floors',                                  desc: '1 floor = 2.5mm. 12F=30mm cap.' },
+  { id: 'shelter_distance', label: '避難所距離（遠いほど高い）&Shelter Distance',             desc: 'Farther from shelter = taller. 300m=10mm, 600m=21mm.' },
+  { id: 'landprice',        label: '地価公示（高いほど高い）&Land Price',                    desc: 'Higher price = taller. Log scale. Data: L01 2025.' },
+  { id: 'population',       label: '人口密度（密集ほど高い）&Population Density',             desc: '500m mesh population density. 25000/km2 = 17mm.' },
 ];
 
 const BASE_THICKNESS = 1.0;
