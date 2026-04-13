@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PLATEAU 3D Print Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
+#canvas { width: 100vw; height: 100vh; display: block; }
+#ui {
+  position: fixed; top: 16px; left: 16px;
+  background: rgba(20,20,40,0.92); border-radius: 12px; padding: 20px;
+  width: 320px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.1);
+  max-height: calc(100vh - 32px); overflow-y: auto;
+}
+h2 { font-size: 16px; margin-bottom: 12px; color: #7dd3fc; }
+label { display: block; font-size: 12px; color: #aaa; margin-top: 10px; margin-bottom: 4px; }
+select, input[type=range] { width: 100%; }
+select {
+  background: #2a2a4a; color: #eee; border: 1px solid #444; border-radius: 6px;
+  padding: 6px 8px; font-size: 13px; cursor: pointer;
+}
+input[type=range] { accent-color: #7dd3fc; cursor: pointer; }
+.stat {
+  display: flex; justify-content: space-between; font-size: 12px;
+  padding: 2px 0; color: #888;
+}
+.stat .val { color: #fff; font-weight: 600; }
+#info { margin-top: 12px; padding-top: 10px; border-top: 1px solid #333; }
+button {
+  width: 100%; margin-top: 14px; padding: 10px; font-size: 14px; font-weight: 600;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff;
+  border: none; border-radius: 8px; cursor: pointer; transition: opacity 0.2s;
+}
+button:hover { opacity: 0.85; }
+button:disabled { opacity: 0.4; cursor: wait; }
+#loading {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: #1a1a2e; z-index: 100; font-size: 18px; color: #7dd3fc;
+}
+.mode-desc { font-size: 11px; color: #888; margin-top: 4px; line-height: 1.4; }
+</style>
+</head>
+<body>
+
+<div id="loading">Loading...</div>
+<canvas id="canvas"></canvas>
+
+<div id="ui">
+  <h2>PLATEAU 3D Print Viewer</h2>
+
+  <label>Area</label>
+  <select id="area">
+    <option value="buildings_634635.json">錦糸町駅周辺 (5,572 buildings)</option>
+    <option value="buildings_654655.json">押上駅周辺 (9,282 buildings)</option>
+  </select>
+
+  <label>Z-axis Mode</label>
+  <select id="mode"></select>
+  <div id="modeDesc" class="mode-desc"></div>
+
+  <label>Height Scale</label>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <input type="range" id="heightScale" min="0.01" max="5" step="0.01" value="1.0" style="flex:1;">
+    <input type="number" id="scaleNum" min="0.01" max="100" step="0.01" value="1.0"
+      style="width:70px;background:#2a2a4a;color:#fff;border:1px solid #444;border-radius:6px;padding:4px 6px;font-size:13px;text-align:right;">
+    <span style="font-size:12px;color:#888;">x</span>
+  </div>
+
+  <div id="info">
+    <div class="stat"><span>Buildings</span><span class="val" id="statCount">-</span></div>
+    <div class="stat"><span>Print XY</span><span class="val" id="statXY">-</span></div>
+    <div class="stat"><span>Max height</span><span class="val" id="statMaxH">-</span></div>
+    <div class="stat" id="statMaxH2Row" style="display:none;"><span>Max (excl. Skytree)</span><span class="val" id="statMaxH2">-</span></div>
+    <div class="stat"><span>Median height</span><span class="val" id="statMedH">-</span></div>
+    <div class="stat"><span>Scale</span><span class="val" id="statScale">-</span></div>
+  </div>
+
+  <button id="dlBtn" onclick="downloadSTL()">Download STL</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+
+const MODES = [
+  { id: 'height',           label: 'Building Height (raw)',        desc: 'Actual measured height. 1m = 1mm.' },
+  { id: 'age',              label: 'Building Age',                 desc: 'Older buildings = taller. S46 before=25mm, S57-H1=12mm, H2+=6mm.' },
+  { id: 'structure',        label: 'Structure (Wood)',             desc: 'Wooden=22mm, RC/Steel=5mm. Highlights wooden building density.' },
+  { id: 'fireproof',        label: 'Fire Resistance',             desc: 'Non-fireproof=25mm, Semi=14mm, Fireproof=4mm.' },
+  { id: 'wooden_old',       label: 'Aging Risk (Wood x Age)',     desc: 'Composite of wooden structure and age. Max 29mm.' },
+  { id: 'flood_depth',      label: 'River Flood Depth',           desc: 'Deeper flooding = taller. 1m depth = 12mm.' },
+  { id: 'hightide',         label: 'High Tide Depth',             desc: 'Storm surge flood depth x5.5.' },
+  { id: 'flood_combined',   label: 'Flood Combined',              desc: 'Max of river flood and high tide depth.' },
+  { id: 'roof_area',        label: 'Roof Area',                   desc: 'Larger roof = taller. sqrt compression. Factories stand out.' },
+  { id: 'usage',            label: 'Building Usage',              desc: 'Business=28mm, Commercial=22mm, Residential=6mm.' },
+  { id: 'floor_area_rate',  label: 'Floor Area Ratio',            desc: 'Higher FAR = taller. 200%=8mm, 500%=20mm.' },
+  { id: 'storeys',          label: 'Number of Floors',            desc: '1 floor = 2.5mm. 12F=30mm cap.' },
+  { id: 'shelter_distance', label: 'Shelter Distance',            desc: 'Farther from shelter = taller. 300m=10mm, 600m=21mm.' },
+  { id: 'landprice',        label: 'Land Price',                  desc: 'Higher price = taller. Log scale. Data: L01 2025.' },
+  { id: 'population',       label: 'Population Density',          desc: '500m mesh population density. 25000/km2 = 17mm.' },
+];
+
+const BASE_THICKNESS = 1.0;
+let scene, camera, renderer, controls, buildingsGroup, basePlate;
+let currentData = null;
+let exporter;
+
+// Init Three.js
+const canvas = document.getElementById('canvas');
+renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x1a1a2e);
+
+scene = new THREE.Scene();
+camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10000);
+camera.position.set(0, -150, 200);
+
+controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(100, -100, 200);
+scene.add(dirLight);
+const dirLight2 = new THREE.DirectionalLight(0x88aaff, 0.3);
+dirLight2.position.set(-100, 100, 100);
+scene.add(dirLight2);
+
+exporter = new STLExporter();
+buildingsGroup = new THREE.Group();
+scene.add(buildingsGroup);
+
+// Populate mode dropdown
+const modeSelect = document.getElementById('mode');
+MODES.forEach(m => {
+  const opt = document.createElement('option');
+  opt.value = m.id;
+  opt.textContent = m.label;
+  modeSelect.appendChild(opt);
+});
+
+// Z-value calculation (mirrors Python get_z_value)
+function getZValue(attrs, mode) {
+  const h = attrs.height || 5;
+  const kvp100 = attrs.kvp_100 || '99';
+  const kvp101 = attrs.kvp_101 || '9';
+  const fp = attrs.fireproof || '1001';
+  const usage = attrs.usage || '411';
+
+  switch (mode) {
+    case 'height':
+      return (h != null && h >= 0) ? h : 5;
+
+    case 'storeys': {
+      let s = attrs.storeys || 2;
+      if (s < 0 || s > 100) s = 2;
+      return Math.min(s * 2.5, 30);
+    }
+    case 'age': {
+      const m = { '11': 25, '12': 18, '21': 12, '22': 6, '23': 3, '99': 1.5 };
+      return m[kvp100] || 5;
+    }
+    case 'structure': {
+      const m = { '1': 22, '2': 5, '3': 12, '9': 1.5 };
+      return m[kvp101] || 5;
+    }
+    case 'fireproof': {
+      const m = { '1001': 4, '1002': 14, '1003': 25, '1004': 25, '1011': 6 };
+      return m[fp] || 12;
+    }
+    case 'wooden_old': {
+      const ageS = { '11': 5, '12': 4, '21': 3, '22': 2, '23': 1, '99': 0 }[kvp100] || 1;
+      const woodS = { '1': 4, '2': 1, '3': 2, '9': 0 }[kvp101] || 1;
+      return ageS * woodS * 1.4 + 1;
+    }
+    case 'roof_area': {
+      let ra = attrs.roof_area || 50;
+      if (ra < 0 || ra > 50000) ra = 50;
+      return Math.min(Math.sqrt(ra) * 2.0, 30);
+    }
+    case 'flood_depth': {
+      const d = attrs.flood_depth || 0;
+      return d > 0 ? Math.min(d * 12, 30) : 1.0;
+    }
+    case 'hightide': {
+      const d = attrs.hightide_depth || 0;
+      return d > 0 ? Math.min(d * 5.5, 30) : 1.0;
+    }
+    case 'flood_combined': {
+      const d = Math.max(attrs.flood_depth || 0, attrs.hightide_depth || 0);
+      return d > 0 ? Math.min(d * 5.5, 30) : 1.0;
+    }
+    case 'floor_area_rate':
+      return Math.min((attrs.floor_area_rate || 200) * 0.04, 30);
+
+    case 'usage': {
+      const m = {
+        '401':28,'402':22,'403':26,'404':24,'411':6,'412':8,'413':10,'414':12,
+        '421':16,'431':4,'441':18,'451':3,'452':14,'453':24,'461':2,'462':1.5
+      };
+      return m[usage] || 6;
+    }
+    case 'shelter_distance': {
+      // Approximate - use pre-computed if available, else use centroid distance
+      // For web viewer, we'll estimate from attrs if shelter data is embedded
+      const dist = attrs._shelter_dist;
+      if (dist != null) return Math.min(dist * 0.035, 30);
+      return 10; // fallback
+    }
+    case 'landprice': {
+      const price = attrs._landprice;
+      if (price != null && price > 0) return Math.min(Math.log10(price / 100000) * 18 + 5, 30);
+      return 10;
+    }
+    case 'population': {
+      const dens = attrs._pop_density;
+      if (dens != null) return Math.min(dens / 1500, 30);
+      return 10;
+    }
+    default:
+      return h;
+  }
+}
+
+// Build 3D geometry
+function buildScene(data, mode, heightMul) {
+  // Clear old
+  while (buildingsGroup.children.length) {
+    const c = buildingsGroup.children[0];
+    c.geometry?.dispose();
+    c.material?.dispose();
+    buildingsGroup.remove(c);
+  }
+  if (basePlate) {
+    basePlate.geometry?.dispose();
+    basePlate.material?.dispose();
+    scene.remove(basePlate);
+  }
+
+  const scale = data.scale;
+  const buildings = data.buildings;
+
+  // Color gradient based on height
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0x4488cc,
+    flatShading: true,
+    side: THREE.DoubleSide,
+  });
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let heights = [];
+
+  // Merge all buildings into one geometry for performance
+  const allGeometries = [];
+
+  for (const b of buildings) {
+    const fp = b.fp;
+    if (fp.length < 3) continue;
+
+    const zVal = getZValue(b.a, mode) * heightMul;
+    const hmm = Math.max(zVal, 0.4);
+    heights.push(hmm);
+
+    // Scale footprint to mm
+    const pts2d = fp.map(p => [p[0] * scale, p[1] * scale]);
+
+    // Track bounds
+    for (const p of pts2d) {
+      minX = Math.min(minX, p[0]);
+      minY = Math.min(minY, p[1]);
+      maxX = Math.max(maxX, p[0]);
+      maxY = Math.max(maxY, p[1]);
+    }
+
+    // Create shape
+    const shape = new THREE.Shape();
+    shape.moveTo(pts2d[0][0], pts2d[0][1]);
+    for (let i = 1; i < pts2d.length; i++) {
+      shape.lineTo(pts2d[i][0], pts2d[i][1]);
+    }
+    shape.closePath();
+
+    const extrudeSettings = { depth: hmm, bevelEnabled: false };
+    const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+    geo.translate(0, 0, BASE_THICKNESS);
+    allGeometries.push(geo);
+  }
+
+  // Merge for performance
+  if (allGeometries.length > 0) {
+    const merged = mergeGeometries(allGeometries);
+    const mesh = new THREE.Mesh(merged, mat);
+    buildingsGroup.add(mesh);
+
+    // Dispose individual geometries
+    allGeometries.forEach(g => g.dispose());
+  }
+
+  // Base plate
+  const margin = 2;
+  const bw = (maxX - minX) + margin * 2;
+  const bh = (maxY - minY) + margin * 2;
+  const baseGeo = new THREE.BoxGeometry(bw, bh, BASE_THICKNESS);
+  const baseMat = new THREE.MeshPhongMaterial({ color: 0x333344, flatShading: true });
+  basePlate = new THREE.Mesh(baseGeo, baseMat);
+  basePlate.position.set((minX + maxX) / 2, (minY + maxY) / 2, BASE_THICKNESS / 2);
+  scene.add(basePlate);
+
+  // Update stats
+  heights.sort((a, b) => a - b);
+  const maxH = heights[heights.length - 1] || 0;
+  const medH = heights[Math.floor(heights.length / 2)] || 0;
+  document.getElementById('statCount').textContent = buildings.length.toLocaleString();
+  document.getElementById('statXY').textContent = `${(data.range_m[0] * scale).toFixed(0)} x ${(data.range_m[1] * scale).toFixed(0)} mm`;
+  document.getElementById('statMaxH').textContent = `${(maxH + BASE_THICKNESS).toFixed(1)} mm`;
+  document.getElementById('statMedH').textContent = `${(medH + BASE_THICKNESS).toFixed(1)} mm`;
+  document.getElementById('statScale').textContent = `1:${Math.round(1 / scale)}`;
+
+  // Show "Max excl. Skytree" for 押上 area in height mode
+  const isOshiage = document.getElementById('area').value.includes('654655');
+  const isHeight = mode === 'height';
+  const row2 = document.getElementById('statMaxH2Row');
+  if (isOshiage && isHeight && maxH > 200) {
+    const filtered = heights.filter(h => h < 200);
+    const maxH2 = filtered.length > 0 ? filtered[filtered.length - 1] : 0;
+    document.getElementById('statMaxH2').textContent = `${(maxH2 + BASE_THICKNESS).toFixed(1)} mm`;
+    row2.style.display = '';
+  } else {
+    row2.style.display = 'none';
+  }
+
+  // Center camera target
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  controls.target.set(cx, cy, 0);
+  camera.position.set(cx, cy - 150, 150);
+  controls.update();
+}
+
+// Simple geometry merge (no BufferGeometryUtils dependency)
+function mergeGeometries(geometries) {
+  let totalVerts = 0;
+  let totalIdx = 0;
+  for (const g of geometries) {
+    totalVerts += g.attributes.position.count;
+    totalIdx += g.index ? g.index.count : 0;
+  }
+
+  const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
+  const indices = new Uint32Array(totalIdx);
+
+  let vOff = 0, iOff = 0, vBase = 0;
+  for (const g of geometries) {
+    const pos = g.attributes.position.array;
+    const nor = g.attributes.normal.array;
+    positions.set(pos, vOff * 3);
+    normals.set(nor, vOff * 3);
+
+    if (g.index) {
+      const idx = g.index.array;
+      for (let i = 0; i < idx.length; i++) {
+        indices[iOff + i] = idx[i] + vBase;
+      }
+      iOff += idx.length;
+    }
+    vBase += g.attributes.position.count;
+    vOff += g.attributes.position.count;
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  if (totalIdx > 0) merged.setIndex(new THREE.BufferAttribute(indices, 1));
+  return merged;
+}
+
+// Load data
+async function loadArea(url) {
+  document.getElementById('loading').style.display = 'flex';
+  document.getElementById('loading').textContent = `Loading ${url}...`;
+  document.getElementById('dlBtn').disabled = true;
+
+  try {
+    const resp = await fetch(url);
+    currentData = await resp.json();
+
+    // Pre-compute external data attributes for shelter/landprice/population
+    await precomputeExternalAttrs(currentData);
+
+    const mode = document.getElementById('mode').value;
+    const hScale = parseFloat(document.getElementById('heightScale').value);
+    buildScene(currentData, mode, hScale);
+  } catch (e) {
+    document.getElementById('loading').textContent = `Error: ${e.message}. Make sure JSON files are in the same directory.`;
+    return;
+  }
+
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('dlBtn').disabled = false;
+}
+
+// Pre-compute external data for each building (shelter distance, land price, population)
+async function precomputeExternalAttrs(data) {
+  // Try to load external data files
+  let shelters = [], landprices = [], population = [];
+  try {
+    const r1 = await fetch('external_data/sumida_shelters_valid.json');
+    shelters = await r1.json();
+  } catch(e) {}
+  try {
+    const r2 = await fetch('external_data/sumida_landprice.json');
+    landprices = await r2.json();
+  } catch(e) {}
+  try {
+    const r3 = await fetch('external_data/sumida_population.json');
+    population = await r3.json();
+  } catch(e) {}
+
+  const refLat = data.ref_lat;
+  const refLon = data.ref_lon;
+  const cosLat = Math.cos(refLat * Math.PI / 180);
+
+  function dist(lat1, lon1, lat2, lon2) {
+    const dx = (lon2 - lon1) * 111320 * cosLat;
+    const dy = (lat2 - lat1) * 110540;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  for (const b of data.buildings) {
+    const clat = b.a.centroid_lat;
+    const clon = b.a.centroid_lon;
+    if (!clat || !clon) continue;
+
+    // Shelter distance
+    if (shelters.length > 0) {
+      let minD = Infinity;
+      for (const s of shelters) {
+        const d = dist(clat, clon, s.lat, s.lon);
+        if (d < minD) minD = d;
+      }
+      b.a._shelter_dist = minD;
+    }
+
+    // Land price (nearest 3, IDW)
+    if (landprices.length > 0) {
+      const dists = landprices.map(p => ({ d: dist(clat, clon, p.lat, p.lon), price: p.price }));
+      dists.sort((a, b) => a.d - b.d);
+      const top3 = dists.slice(0, 3);
+      const wSum = top3.reduce((s, x) => s + 1 / Math.max(x.d, 1), 0);
+      b.a._landprice = top3.reduce((s, x) => s + (1 / Math.max(x.d, 1)) * x.price, 0) / wSum;
+    }
+
+    // Population (nearest mesh)
+    if (population.length > 0) {
+      let minD = Infinity, bestDens = 10000;
+      for (const m of population) {
+        const d = dist(clat, clon, m.lat, m.lon);
+        if (d < minD) { minD = d; bestDens = m.pop_density; }
+      }
+      b.a._pop_density = bestDens;
+    }
+  }
+}
+
+// STL Download
+window.downloadSTL = function() {
+  if (!buildingsGroup.children.length) return;
+
+  const exportScene = new THREE.Scene();
+  buildingsGroup.children.forEach(c => {
+    exportScene.add(c.clone());
+  });
+  if (basePlate) exportScene.add(basePlate.clone());
+
+  const result = exporter.parse(exportScene, { binary: true });
+  const blob = new Blob([result], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const mode = document.getElementById('mode').value;
+  const hScale = document.getElementById('heightScale').value;
+  a.href = url;
+  a.download = `sumida_${mode}_x${hScale}.stl`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// Event listeners
+document.getElementById('area').addEventListener('change', (e) => loadArea(e.target.value));
+document.getElementById('mode').addEventListener('change', () => {
+  if (!currentData) return;
+  const mode = document.getElementById('mode').value;
+  const hScale = parseFloat(document.getElementById('heightScale').value);
+  buildScene(currentData, mode, hScale);
+  // Update description
+  const modeInfo = MODES.find(m => m.id === mode);
+  document.getElementById('modeDesc').textContent = modeInfo?.desc || '';
+});
+document.getElementById('heightScale').addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value);
+  document.getElementById('scaleNum').value = v;
+  if (!currentData) return;
+  buildScene(currentData, document.getElementById('mode').value, v);
+});
+document.getElementById('scaleNum').addEventListener('change', (e) => {
+  let v = parseFloat(e.target.value);
+  if (isNaN(v) || v < 0.01) v = 0.01;
+  e.target.value = v;
+  document.getElementById('heightScale').value = Math.min(v, 5);
+  if (!currentData) return;
+  buildScene(currentData, document.getElementById('mode').value, v);
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Animation loop
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// Initial mode description
+document.getElementById('modeDesc').textContent = MODES[0].desc;
+
+// Initial load
+loadArea('buildings_634635.json');
+</script>
+</body>
+</html>
