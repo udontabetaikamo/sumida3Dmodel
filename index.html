@@ -129,7 +129,7 @@ const BUILDING_MODES = [
 ];
 
 const ROAD_MODES = [
-  { id: 'width',     label: '道路幅員（広いほど高い）&Road Width',                desc: 'Wider road = taller. 1m width = 1.2mm. Highlights arterial streets.' },
+  { id: 'width',     label: '道路幅員（実測値）&Road Width (raw)',                desc: 'Actual measured width. 1m width = 1mm at scale 1.0 (no exaggeration). PLATEAU raw value.' },
   { id: 'narrow',    label: '狭隘度（4m未満ほど高い）&Narrow Road Risk',           desc: 'Roads under 4m stand tall. Visualizes fire-truck inaccessibility.' },
   { id: 'class',     label: '道路種別（国道ほど高い）&Road Class',                 desc: 'National=25mm, Pref=18mm, City=8mm, Other=3mm.' },
   { id: 'function',  label: '機能区分&Road Function',                            desc: 'PLATEAU tran:function code mapped to height (motorway tallest).' },
@@ -377,7 +377,9 @@ function getRoadZValue(attrs, mode) {
 
   switch (mode) {
     case 'width':
-      return Math.min(Math.max(w * 1.2, 0.6), 30);
+      // 実測幅員(m) をそのまま Z 値として使用 (1m = 1mm 換算、誇張なし)
+      // heightMul=1.0 で「1m = 1mm」表示、heightMul=data.scale で真の比率
+      return Math.min(Math.max(w, 0.6), 30);
     case 'narrow':
       // < 4m roads stand out (fire-truck inaccessibility)
       if (w < 2) return 25;
@@ -434,7 +436,11 @@ function buildScene(layersData, target, mode, heightMul) {
 
     const isPrimary = def.id === target;
     const useMode = isPrimary ? mode : def.defaultMode;
-    const useMul  = isPrimary ? heightMul : def.defaultMul;
+    // Context layers also respect the user's Height Scale, multiplied by
+    // their defaultMul (kept as "emphasis ratio" so context stays quieter
+    // than primary). On Reset (heightMul=data.scale), this gives all
+    // layers — primary and context — at true PLATEAU proportions.
+    const useMul  = isPrimary ? heightMul : heightMul * def.defaultMul;
     const colorHex = isPrimary ? def.color : def.contextColor;
 
     const res = extrudeLayer(def, data, useMode, useMul);
