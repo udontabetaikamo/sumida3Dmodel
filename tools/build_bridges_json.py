@@ -27,10 +27,8 @@ from _plateau_common import (
 
 
 def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
-    """1ファイルから Bridge を抽出して [{fp, a}, ...] を返す。
-
-    bbox判定は「全ポリゴンの全頂点のうち1つでもbbox内」とゆるくする。
-    フットプリントは最大面積の水平面 (Z分散が小) を選ぶ。"""
+    """各 Bridge 要素の中の「水平で十分大きい polygon」を 1 つずつアイテム化。
+    1つの Bridge が複数の橋(の床版)を含むケースに対応。"""
     out = []
     bridges = list(iter_local(root, 'Bridge'))
     stats['bridge_elems'] += len(bridges)
@@ -47,47 +45,44 @@ def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
             stats['no_geom'] += 1
             continue
 
-        # 全ポリゴンを local meters に変換し、頂点 1 つでも bbox に入るかチェック
-        polys_xy = []
-        all_in_bbox = False
+        polys_with_xy = []
         all_xy_pts = []
         for ext, _holes in polys:
             xy = polygon_to_xy(ext, ref_lon, ref_lat)
-            polys_xy.append((xy, ext))
-            for p in xy:
-                all_xy_pts.append(p)
-                if in_bbox(p, bbox_m):
-                    all_in_bbox = True
+            polys_with_xy.append((xy, ext))
+            all_xy_pts.extend(xy)
 
-        # デバッグ: 最初の数件の bbox を出力
-        if stats['printed_debug'] < 3 and all_xy_pts:
+        # 全 Bridge の位置を出力
+        if all_xy_pts:
             xs = [p[0] for p in all_xy_pts]
             ys = [p[1] for p in all_xy_pts]
-            print(f"  [DEBUG bridge#{bi}] vertices_x={min(xs):.0f}..{max(xs):.0f}, "
-                  f"vertices_y={min(ys):.0f}..{max(ys):.0f}, polys={len(polys)}, name={name}")
-            stats['printed_debug'] += 1
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+            in_box = bbox_m[0] <= cx <= bbox_m[2] and bbox_m[1] <= cy <= bbox_m[3]
+            mark = '✓' if in_box else '✗'
+            print(f"  {mark} bridge#{bi}: center=({cx:.0f}, {cy:.0f}), polys={len(polys)}, name={name}")
 
-        if not all_in_bbox:
-            stats['out_of_bbox'] += 1
-            continue
-
-        # フットプリント選択: 各ポリゴンに「面積 / Z分散」スコアを計算し、最大を選ぶ
-        # 水平な大きい面 = 橋の上面 or 下面 を優先
-        best_score = -1
-        best_xy = None
-        for xy, ext in polys_xy:
+        # 各ポリゴンを個別評価: 水平 (Z分散小) かつ十分大きい (>20m²) ものをアイテム化
+        emitted = 0
+        for xy, ext in polys_with_xy:
+            if len(xy) < 3:
+                continue
             area = abs(_polygon_area_xy(xy))
+            if area < 20.0:
+                continue
             zs = [p[2] for p in ext if len(p) >= 3]
             z_var = (max(zs) - min(zs)) if zs else 0
-            score = area / (z_var + 0.5)  # 水平&大きい程高得点
-            if score > best_score:
-                best_score = score
-                best_xy = xy
+            if z_var > 1.5:  # 高さ差 > 1.5m → 側面/斜面なのでスキップ
+                continue
+            cx_p = sum(p[0] for p in xy) / len(xy)
+            cy_p = sum(p[1] for p in xy) / len(xy)
+            if not (bbox_m[0] <= cx_p <= bbox_m[2] and bbox_m[1] <= cy_p <= bbox_m[3]):
+                continue
+            out.append({'fp': xy, 'a': {'name': name} if name else {}})
+            emitted += 1
 
-        if best_xy is None or len(best_xy) < 3:
-            continue
-
-        out.append({'fp': best_xy, 'a': {'name': name} if name else {}})
+        if emitted == 0:
+            stats['out_of_bbox'] += 1
 
     return out
 
@@ -108,7 +103,8 @@ def main():
     ap.add_argument('--buildings-json', required=True)
     ap.add_argument('--area', required=True)
     ap.add_argument('--output', required=True)
-    ap.add_argument('--bbox-margin', type=float, default=200.0)
+    ap.add_argument('--bbox-margin', type=float, default=200.0,
+                    help='印刷範囲を越えてどれくらいの橋梁を含めるか(m). 隅田川の橋を入れたい場合は 2500 程度を試してください。')
     args = ap.parse_args()
 
     with open(args.buildings_json) as f:
@@ -129,7 +125,7 @@ def main():
 
     print(f"\nProcessing {len(files)} brid file(s)...")
     items = []
-    stats = {'bridge_elems': 0, 'no_geom': 0, 'out_of_bbox': 0, 'printed_debug': 0}
+    stats = {'bridge_elems': 0, 'no_geom': 0, 'out_of_bbox': 0}
     for fp in files:
         root = parse_xml(fp)
         if root is None:
