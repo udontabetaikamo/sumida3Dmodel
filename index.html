@@ -53,8 +53,14 @@ button:disabled { opacity: 0.4; cursor: wait; }
 
   <label>Area</label>
   <select id="area">
-    <option value="buildings_634635.json">錦糸町駅周辺 (5,572 buildings)</option>
-    <option value="buildings_654655.json">押上駅周辺 (9,282 buildings)</option>
+    <option value="634635">錦糸町駅周辺</option>
+    <option value="654655">押上駅周辺</option>
+  </select>
+
+  <label>Target</label>
+  <select id="target">
+    <option value="buildings">Buildings（建物だけ）</option>
+    <option value="roads">Roads（道路だけ）</option>
   </select>
 
   <label>Z-axis Mode</label>
@@ -70,7 +76,7 @@ button:disabled { opacity: 0.4; cursor: wait; }
   </div>
 
   <div id="info">
-    <div class="stat"><span>Buildings</span><span class="val" id="statCount">-</span></div>
+    <div class="stat"><span id="statCountLabel">Buildings</span><span class="val" id="statCount">-</span></div>
     <div class="stat"><span>Print XY</span><span class="val" id="statXY">-</span></div>
     <div class="stat"><span>Max height</span><span class="val" id="statMaxH">-</span></div>
     <div class="stat" id="statMaxH2Row" style="display:none;"><span>Max (excl. Skytree)</span><span class="val" id="statMaxH2">-</span></div>
@@ -94,7 +100,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
-const MODES = [
+const BUILDING_MODES = [
   { id: 'height',           label: '建物高さ（実測値）&Building Height (raw)',               desc: 'Actual measured height. 1m = 1mm.' },
   { id: 'age',              label: '築年数（古いほど高い）&Building Age',                    desc: 'Older buildings = taller. S46 before=25mm, S57-H1=12mm, H2+=6mm.' },
   { id: 'structure',        label: '構造（木造ほど高い）&Structure (Wood)',                  desc: 'Wooden=22mm, RC/Steel=5mm. Highlights wooden building density.' },
@@ -111,6 +117,18 @@ const MODES = [
   { id: 'landprice',        label: '地価公示（高いほど高い）&Land Price',                    desc: 'Higher price = taller. Log scale. Data: L01 2025.' },
   { id: 'population',       label: '人口密度（密集ほど高い）&Population Density',             desc: '500m mesh population density. 25000/km2 = 17mm.' },
 ];
+
+const ROAD_MODES = [
+  { id: 'width',     label: '道路幅員（広いほど高い）&Road Width',                desc: 'Wider road = taller. 1m width = 1.2mm. Highlights arterial streets.' },
+  { id: 'narrow',    label: '狭隘度（4m未満ほど高い）&Narrow Road Risk',           desc: 'Roads under 4m stand tall. Visualizes fire-truck inaccessibility.' },
+  { id: 'class',     label: '道路種別（国道ほど高い）&Road Class',                 desc: 'National=25mm, Pref=18mm, City=8mm, Other=3mm.' },
+  { id: 'function',  label: '機能区分&Road Function',                            desc: 'PLATEAU tran:function code mapped to height (motorway tallest).' },
+  { id: 'emergency', label: '緊急輸送道路&Emergency Transport Road',              desc: 'Designated emergency route = 22mm, else = 3mm. Requires merged data.' },
+  { id: 'traffic',   label: '24h交通量&Daily Traffic Volume',                    desc: 'Road census 24h volume. 50,000 vehicles/day = 30mm. Requires N01 data.' },
+  { id: 'uniform',   label: '均一高さ&Uniform Height',                           desc: 'All roads at 4mm. Pure street-network topology view.' },
+];
+
+const MODES_BY_TARGET = { buildings: BUILDING_MODES, roads: ROAD_MODES };
 
 const BASE_THICKNESS = 1.0;
 let scene, camera, renderer, controls, buildingsGroup, basePlate;
@@ -145,14 +163,20 @@ exporter = new STLExporter();
 buildingsGroup = new THREE.Group();
 scene.add(buildingsGroup);
 
-// Populate mode dropdown
+// Populate mode dropdown for the active target
 const modeSelect = document.getElementById('mode');
-MODES.forEach(m => {
-  const opt = document.createElement('option');
-  opt.value = m.id;
-  opt.textContent = m.label;
-  modeSelect.appendChild(opt);
-});
+function populateModeDropdown(target) {
+  const modes = MODES_BY_TARGET[target] || BUILDING_MODES;
+  modeSelect.innerHTML = '';
+  modes.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    modeSelect.appendChild(opt);
+  });
+  document.getElementById('modeDesc').textContent = modes[0]?.desc || '';
+}
+populateModeDropdown('buildings');
 
 // Z-value calculation (mirrors Python get_z_value)
 function getZValue(attrs, mode) {
@@ -237,7 +261,47 @@ function getZValue(attrs, mode) {
   }
 }
 
-// Build 3D geometry
+// Z-value for road segments
+function getRoadZValue(attrs, mode) {
+  const w = (attrs.width != null && attrs.width > 0) ? attrs.width : 4.0;
+  const cls = String(attrs.class ?? '');
+  const fn = String(attrs.function ?? '');
+
+  switch (mode) {
+    case 'width':
+      return Math.min(Math.max(w * 1.2, 0.6), 30);
+    case 'narrow':
+      // < 4m roads stand out (fire-truck inaccessibility)
+      if (w < 2) return 25;
+      if (w < 4) return 16;
+      if (w < 6) return 6;
+      return 1.5;
+    case 'class': {
+      // 1:高速, 2:国道, 3:都道府県道, 4:市区町村道, 9:その他
+      const m = { '1': 28, '2': 25, '3': 18, '4': 8, '9': 3 };
+      return m[cls] || 4;
+    }
+    case 'function': {
+      // PLATEAU tran:function (CityGML codeSpace)
+      // 1000:車道部, 2000:車道交差部, 3000:車道接続部, 5000:歩道部, 8000:島
+      const m = { '1000': 14, '2000': 18, '3000': 10, '5000': 4, '8000': 2 };
+      return m[fn] || 6;
+    }
+    case 'emergency':
+      return attrs.emergency ? 22 : 3;
+    case 'traffic': {
+      const t = attrs.traffic_24h;
+      if (t == null || t <= 0) return 1.5;
+      return Math.min(t / 1700, 30); // 50,000台/日 ≈ 30mm
+    }
+    case 'uniform':
+      return 4;
+    default:
+      return Math.min(w, 30);
+  }
+}
+
+// Build 3D geometry — dispatches based on data type
 function buildScene(data, mode, heightMul) {
   // Clear old
   while (buildingsGroup.children.length) {
@@ -252,10 +316,17 @@ function buildScene(data, mode, heightMul) {
     scene.remove(basePlate);
   }
 
+  if (data.type === 'roads' || data.roads) {
+    buildRoadsScene(data, mode, heightMul);
+  } else {
+    buildBuildingsScene(data, mode, heightMul);
+  }
+}
+
+function buildBuildingsScene(data, mode, heightMul) {
   const scale = data.scale;
   const buildings = data.buildings;
 
-  // Color gradient based on height
   const mat = new THREE.MeshPhongMaterial({
     color: 0x4488cc,
     flatShading: true,
@@ -264,8 +335,6 @@ function buildScene(data, mode, heightMul) {
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let heights = [];
-
-  // Merge all buildings into one geometry for performance
   const allGeometries = [];
 
   for (const b of buildings) {
@@ -276,42 +345,108 @@ function buildScene(data, mode, heightMul) {
     const hmm = Math.max(zVal, 0.4);
     heights.push(hmm);
 
-    // Scale footprint to mm
     const pts2d = fp.map(p => [p[0] * scale, p[1] * scale]);
-
-    // Track bounds
     for (const p of pts2d) {
-      minX = Math.min(minX, p[0]);
-      minY = Math.min(minY, p[1]);
-      maxX = Math.max(maxX, p[0]);
-      maxY = Math.max(maxY, p[1]);
+      minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]);
+      maxX = Math.max(maxX, p[0]); maxY = Math.max(maxY, p[1]);
     }
 
-    // Create shape
     const shape = new THREE.Shape();
     shape.moveTo(pts2d[0][0], pts2d[0][1]);
-    for (let i = 1; i < pts2d.length; i++) {
-      shape.lineTo(pts2d[i][0], pts2d[i][1]);
-    }
+    for (let i = 1; i < pts2d.length; i++) shape.lineTo(pts2d[i][0], pts2d[i][1]);
     shape.closePath();
 
-    const extrudeSettings = { depth: hmm, bevelEnabled: false };
-    const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: hmm, bevelEnabled: false });
     geo.translate(0, 0, BASE_THICKNESS);
     allGeometries.push(geo);
   }
 
-  // Merge for performance
+  finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, 'Buildings', buildings.length);
+}
+
+function buildRoadsScene(data, mode, heightMul) {
+  const scale = data.scale;
+  const roads = data.roads;
+
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0xd97757,
+    flatShading: true,
+    side: THREE.DoubleSide,
+  });
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let heights = [];
+  const allGeometries = [];
+  let segCount = 0;
+
+  for (const r of roads) {
+    const line = r.line;
+    if (!line || line.length < 2) continue;
+
+    const widthM = (r.a?.width != null && r.a.width > 0) ? r.a.width : 4.0;
+    const halfW = (widthM / 2) * scale; // mm
+
+    const zVal = getRoadZValue(r.a || {}, mode) * heightMul;
+    const hmm = Math.max(zVal, 0.4);
+
+    // Scale polyline to mm
+    const pts = line.map(p => [p[0] * scale, p[1] * scale]);
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const dx = p2[0] - p1[0];
+      const dy = p2[1] - p1[1];
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1e-4) continue;
+      const nx = -dy / len;
+      const ny = dx / len;
+
+      // 4 corners of the segment ribbon (mm)
+      const c1 = [p1[0] + nx * halfW, p1[1] + ny * halfW];
+      const c2 = [p2[0] + nx * halfW, p2[1] + ny * halfW];
+      const c3 = [p2[0] - nx * halfW, p2[1] - ny * halfW];
+      const c4 = [p1[0] - nx * halfW, p1[1] - ny * halfW];
+
+      for (const c of [c1, c2, c3, c4]) {
+        minX = Math.min(minX, c[0]); minY = Math.min(minY, c[1]);
+        maxX = Math.max(maxX, c[0]); maxY = Math.max(maxY, c[1]);
+      }
+
+      const shape = new THREE.Shape();
+      shape.moveTo(c1[0], c1[1]);
+      shape.lineTo(c2[0], c2[1]);
+      shape.lineTo(c3[0], c3[1]);
+      shape.lineTo(c4[0], c4[1]);
+      shape.closePath();
+
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: hmm, bevelEnabled: false });
+      geo.translate(0, 0, BASE_THICKNESS);
+      allGeometries.push(geo);
+      heights.push(hmm);
+      segCount++;
+    }
+  }
+
+  finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, 'Segments', segCount);
+}
+
+function finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, countLabel, count) {
   if (allGeometries.length > 0) {
     const merged = mergeGeometries(allGeometries);
     const mesh = new THREE.Mesh(merged, mat);
     buildingsGroup.add(mesh);
-
-    // Dispose individual geometries
     allGeometries.forEach(g => g.dispose());
   }
 
-  // Base plate
+  const scale = data.scale;
+
+  // Base plate (use bounds, fallback to data.range_m if empty)
+  if (!isFinite(minX)) {
+    const w = (data.range_m?.[0] || 100) * scale;
+    const h = (data.range_m?.[1] || 100) * scale;
+    minX = -w / 2; maxX = w / 2; minY = -h / 2; maxY = h / 2;
+  }
   const margin = 2;
   const bw = (maxX - minX) + margin * 2;
   const bh = (maxY - minY) + margin * 2;
@@ -321,19 +456,20 @@ function buildScene(data, mode, heightMul) {
   basePlate.position.set((minX + maxX) / 2, (minY + maxY) / 2, BASE_THICKNESS / 2);
   scene.add(basePlate);
 
-  // Update stats
+  // Stats
   heights.sort((a, b) => a - b);
   const maxH = heights[heights.length - 1] || 0;
   const medH = heights[Math.floor(heights.length / 2)] || 0;
-  document.getElementById('statCount').textContent = buildings.length.toLocaleString();
+  document.getElementById('statCountLabel').textContent = countLabel;
+  document.getElementById('statCount').textContent = count.toLocaleString();
   document.getElementById('statXY').textContent = `${(data.range_m[0] * scale).toFixed(0)} x ${(data.range_m[1] * scale).toFixed(0)} mm`;
   document.getElementById('statMaxH').textContent = `${(maxH + BASE_THICKNESS).toFixed(1)} mm`;
   document.getElementById('statMedH').textContent = `${(medH + BASE_THICKNESS).toFixed(1)} mm`;
   document.getElementById('statScale').textContent = `1:${Math.round(1 / scale)}`;
 
-  // Show "Max excl. Skytree" for 押上 area in height mode
-  const isOshiage = document.getElementById('area').value.includes('654655');
-  const isHeight = mode === 'height';
+  // Show "Max excl. Skytree" only for buildings + 押上 + height mode
+  const isOshiage = document.getElementById('area').value === '654655';
+  const isHeight = mode === 'height' && countLabel === 'Buildings';
   const row2 = document.getElementById('statMaxH2Row');
   if (isOshiage && isHeight && maxH > 200) {
     const filtered = heights.filter(h => h < 200);
@@ -344,7 +480,6 @@ function buildScene(data, mode, heightMul) {
     row2.style.display = 'none';
   }
 
-  // Center camera target
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
   controls.target.set(cx, cy, 0);
@@ -390,24 +525,46 @@ function mergeGeometries(geometries) {
   return merged;
 }
 
-// Load data
-async function loadArea(url) {
+// Load data — builds URL from area code + target
+async function loadArea() {
+  const area = document.getElementById('area').value;
+  const target = document.getElementById('target').value;
+  const url = `${target}_${area}.json`;
+
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('loading').textContent = `Loading ${url}...`;
   document.getElementById('dlBtn').disabled = true;
 
   try {
     const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     currentData = await resp.json();
 
-    // Pre-compute external data attributes for shelter/landprice/population
-    await precomputeExternalAttrs(currentData);
+    // Mark data type for the dispatcher
+    if (target === 'roads' && !currentData.type) currentData.type = 'roads';
+
+    // Buildings only: pre-compute external data
+    if (target === 'buildings') {
+      await precomputeExternalAttrs(currentData);
+    }
 
     const mode = document.getElementById('mode').value;
     const hScale = parseFloat(document.getElementById('heightScale').value);
     buildScene(currentData, mode, hScale);
   } catch (e) {
-    document.getElementById('loading').textContent = `Error: ${e.message}. Make sure JSON files are in the same directory.`;
+    const loadingEl = document.getElementById('loading');
+    if (target === 'roads') {
+      loadingEl.innerHTML =
+        `<div style="text-align:center;line-height:1.7;max-width:480px;padding:20px;">` +
+        `<div style="color:#fbbf24;font-size:20px;margin-bottom:8px;">道路データ未生成</div>` +
+        `<div style="font-size:14px;color:#aaa;">` +
+        `<code>${url}</code> が見つかりません。<br>` +
+        `PLATEAU の <code>udx/tran/</code> から JSON を生成するには、<br>` +
+        `<code>tools/build_roads_json.py</code> をローカルで実行してください。<br><br>` +
+        `Target を Buildings に戻すと既存の建物モデルを表示できます。</div></div>`;
+    } else {
+      loadingEl.textContent = `Error: ${e.message}. Make sure ${url} is in the same directory.`;
+    }
     return;
   }
 
@@ -494,21 +651,29 @@ window.downloadSTL = function() {
   const a = document.createElement('a');
   const mode = document.getElementById('mode').value;
   const hScale = document.getElementById('heightScale').value;
+  const target = document.getElementById('target').value;
+  const area = document.getElementById('area').value;
   a.href = url;
-  a.download = `sumida_${mode}_x${hScale}.stl`;
+  a.download = `sumida_${target}_${area}_${mode}_x${hScale}.stl`;
   a.click();
   URL.revokeObjectURL(url);
 };
 
 // Event listeners
-document.getElementById('area').addEventListener('change', (e) => loadArea(e.target.value));
+document.getElementById('area').addEventListener('change', () => loadArea());
+document.getElementById('target').addEventListener('change', () => {
+  const target = document.getElementById('target').value;
+  populateModeDropdown(target);
+  loadArea();
+});
 document.getElementById('mode').addEventListener('change', () => {
   if (!currentData) return;
   const mode = document.getElementById('mode').value;
   const hScale = parseFloat(document.getElementById('heightScale').value);
   buildScene(currentData, mode, hScale);
   // Update description
-  const modeInfo = MODES.find(m => m.id === mode);
+  const target = document.getElementById('target').value;
+  const modeInfo = (MODES_BY_TARGET[target] || BUILDING_MODES).find(m => m.id === mode);
   document.getElementById('modeDesc').textContent = modeInfo?.desc || '';
 });
 document.getElementById('heightScale').addEventListener('input', (e) => {
@@ -540,11 +705,8 @@ function animate() {
 }
 animate();
 
-// Initial mode description
-document.getElementById('modeDesc').textContent = MODES[0].desc;
-
 // Initial load
-loadArea('buildings_634635.json');
+loadArea();
 </script>
 </body>
 </html>
