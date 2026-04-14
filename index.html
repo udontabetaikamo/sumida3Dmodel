@@ -864,18 +864,21 @@ async function precomputeExternalAttrs(data) {
 }
 
 // Reset to PLATEAU original-data defaults (true proportional view)
-// - Z-axis Mode: first option of current target (height/width = raw measured)
+// - Target: 'buildings' (canonical initial state)
+// - Z-axis Mode: first option of BOTH targets
+//   (Buildings → 'height', Roads → 'width' = raw measured values)
 // - Height Scale: matches XY scale so buildings render at TRUE proportions
 //   (1m height = scale*1 mm, e.g. ≈0.079mm at 1:13). This matches how
 //   PLATEAU's standard 3D city viewer displays the data — no artistic
 //   exaggeration of building heights.
 // - Layers: each layer's enabledByDefault state
 window.resetToDefaults = function() {
-  const modes = MODES_BY_TARGET[currentTarget] || BUILDING_MODES;
-  if (modes[0]) {
-    modeSelect.value = modes[0].id;
-    document.getElementById('modeDesc').textContent = modes[0].desc || '';
-  }
+  // Reset Target to 'buildings' (canonical initial state, also clears Roads)
+  document.getElementById('target').value = 'buildings';
+  currentTarget = 'buildings';
+  populateModeDropdown('buildings'); // Sets mode dropdown to BUILDING_MODES[0] = 'height'
+  // Roads' mode is also implicitly reset: when user later switches to Roads,
+  // populateModeDropdown('roads') will set it to ROAD_MODES[0] = 'width'.
 
   // True-proportional height = same as XY scale (data.scale, e.g. 0.079)
   const area = document.getElementById('area').value;
