@@ -73,9 +73,6 @@ button:disabled { opacity: 0.4; cursor: wait; }
   <select id="mode"></select>
   <div id="modeDesc" class="mode-desc"></div>
 
-  <label style="margin-top:14px;border-top:1px solid #333;padding-top:10px;">Layers（重ねて表示するレイヤー）</label>
-  <div id="layerToggles" style="display:flex;flex-direction:column;gap:4px;font-size:12px;"></div>
-
   <label>Height Scale</label>
   <div style="display:flex;gap:8px;align-items:center;">
     <input type="range" id="heightScale" min="0.01" max="5" step="0.01" value="1.0" style="flex:1;">
@@ -83,6 +80,9 @@ button:disabled { opacity: 0.4; cursor: wait; }
       style="width:70px;background:#2a2a4a;color:#fff;border:1px solid #444;border-radius:6px;padding:4px 6px;font-size:13px;text-align:right;">
     <span style="font-size:12px;color:#888;">x</span>
   </div>
+
+  <label style="margin-top:14px;border-top:1px solid #333;padding-top:10px;">Layers（重ねて表示するレイヤー）</label>
+  <div id="layerToggles" style="display:flex;flex-direction:column;gap:4px;font-size:12px;"></div>
 
   <div id="info">
     <div class="stat"><span id="statCountLabel">Buildings</span><span class="val" id="statCount">-</span></div>
@@ -93,6 +93,7 @@ button:disabled { opacity: 0.4; cursor: wait; }
     <div class="stat"><span>Scale</span><span class="val" id="statScale">-</span></div>
   </div>
 
+  <button id="resetBtn" onclick="resetToDefaults()" style="background:linear-gradient(135deg,#475569,#64748b);margin-top:10px;">Reset（PLATEAU元データに戻す）</button>
   <button id="dlBtn" onclick="downloadSTL()">Download STL</button>
 </div>
 
@@ -861,6 +862,38 @@ async function precomputeExternalAttrs(data) {
     }
   }
 }
+
+// Reset to PLATEAU original-data defaults
+// - Z-axis Mode: first option of current target (height for buildings, width for roads)
+// - Height Scale: 1.0
+// - Layers: each layer's enabledByDefault state
+window.resetToDefaults = function() {
+  // Reset Z-axis Mode to first (height/width = raw measured value)
+  const modes = MODES_BY_TARGET[currentTarget] || BUILDING_MODES;
+  if (modes[0]) {
+    modeSelect.value = modes[0].id;
+    document.getElementById('modeDesc').textContent = modes[0].desc || '';
+  }
+
+  // Reset height scale to 1.0
+  document.getElementById('heightScale').value = 1.0;
+  document.getElementById('scaleNum').value = 1.0;
+
+  // Reset all layer visibility to defaults
+  for (const def of LAYER_DEFS) {
+    if (layerAvailable[def.id] === false) {
+      layerVisible[def.id] = false;
+    } else {
+      layerVisible[def.id] = def.enabledByDefault;
+    }
+    const cb = document.querySelector(`.layer-row[data-layer-id="${def.id}"] input`);
+    if (cb && !cb.disabled) cb.checked = layerVisible[def.id];
+  }
+  updateLayerAvailabilityUI();
+
+  // Re-render with defaults; loadAreaLayers handles lazy-loading of newly enabled layers
+  loadAreaLayers();
+};
 
 // STL Download
 window.downloadSTL = function() {

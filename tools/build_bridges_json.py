@@ -22,18 +22,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _plateau_common import (
     bbox_from_buildings_json, collect_polygons, in_bbox, iter_local,
-    localname, parse_xml, polygon_centroid_z, polygon_to_xy,
+    localname, parse_xml, polygon_to_xy,
 )
 
 
 def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
-    """1ファイルから Bridge を抽出して [{fp, a}, ...] を返す。"""
+    """各 Bridge 要素の中の「水平で十分大きい polygon」を 1 つずつアイテム化。
+    1つの Bridge が複数の橋(の床版)を含むケースに対応。"""
     out = []
     bridges = list(iter_local(root, 'Bridge'))
     stats['bridge_elems'] += len(bridges)
 
-    for bridge in bridges:
-        # 名称(あれば)
+    for bi, bridge in enumerate(bridges):
         name = None
         for el in bridge:
             if localname(el.tag) == 'name' and el.text:
@@ -45,22 +45,56 @@ def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
             stats['no_geom'] += 1
             continue
 
-        # 最も低い (Z 平均が最小の) 面をフットプリントとみなす
-        rated = []
-        for ext, _ in polys:
-            z = polygon_centroid_z(ext)
-            rated.append((z if z is not None else float('inf'), ext))
-        rated.sort(key=lambda x: x[0])
-        best_ext = rated[0][1]
+        polys_with_xy = []
+        all_xy_pts = []
+        for ext, _holes in polys:
+            xy = polygon_to_xy(ext, ref_lon, ref_lat)
+            polys_with_xy.append((xy, ext))
+            all_xy_pts.extend(xy)
 
-        fp_xy = polygon_to_xy(best_ext, ref_lon, ref_lat)
-        if not any(in_bbox(p, bbox_m) for p in fp_xy):
+        # 全 Bridge の位置を出力
+        if all_xy_pts:
+            xs = [p[0] for p in all_xy_pts]
+            ys = [p[1] for p in all_xy_pts]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+            in_box = bbox_m[0] <= cx <= bbox_m[2] and bbox_m[1] <= cy <= bbox_m[3]
+            mark = '✓' if in_box else '✗'
+            print(f"  {mark} bridge#{bi}: center=({cx:.0f}, {cy:.0f}), polys={len(polys)}, name={name}")
+
+        # 各ポリゴンを個別評価: 水平 (Z分散小) かつ十分大きい (>20m²) ものをアイテム化
+        emitted = 0
+        for xy, ext in polys_with_xy:
+            if len(xy) < 3:
+                continue
+            area = abs(_polygon_area_xy(xy))
+            if area < 20.0:
+                continue
+            zs = [p[2] for p in ext if len(p) >= 3]
+            z_var = (max(zs) - min(zs)) if zs else 0
+            if z_var > 1.5:  # 高さ差 > 1.5m → 側面/斜面なのでスキップ
+                continue
+            cx_p = sum(p[0] for p in xy) / len(xy)
+            cy_p = sum(p[1] for p in xy) / len(xy)
+            if not (bbox_m[0] <= cx_p <= bbox_m[2] and bbox_m[1] <= cy_p <= bbox_m[3]):
+                continue
+            out.append({'fp': xy, 'a': {'name': name} if name else {}})
+            emitted += 1
+
+        if emitted == 0:
             stats['out_of_bbox'] += 1
-            continue
-
-        out.append({'fp': fp_xy, 'a': {'name': name} if name else {}})
 
     return out
+
+
+def _polygon_area_xy(pts):
+    s = 0.0
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        s += (x1 * y2 - x2 * y1)
+    return s / 2.0
 
 
 def main():
@@ -69,7 +103,8 @@ def main():
     ap.add_argument('--buildings-json', required=True)
     ap.add_argument('--area', required=True)
     ap.add_argument('--output', required=True)
-    ap.add_argument('--bbox-margin', type=float, default=200.0)
+    ap.add_argument('--bbox-margin', type=float, default=200.0,
+                    help='印刷範囲を越えてどれくらいの橋梁を含めるか(m). 隅田川の橋を入れたい場合は 2500 程度を試してください。')
     args = ap.parse_args()
 
     with open(args.buildings_json) as f:
