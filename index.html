@@ -436,11 +436,10 @@ function buildScene(layersData, target, mode, heightMul) {
 
     const isPrimary = def.id === target;
     const useMode = isPrimary ? mode : def.defaultMode;
-    // Context layers also respect the user's Height Scale, multiplied by
-    // their defaultMul (kept as "emphasis ratio" so context stays quieter
-    // than primary). On Reset (heightMul=data.scale), this gives all
-    // layers — primary and context — at true PLATEAU proportions.
-    const useMul  = isPrimary ? heightMul : heightMul * def.defaultMul;
+    // Height Scale (heightMul) ONLY affects the primary (Target) layer.
+    // Context layers stay at their fixed defaultMul so adjusting the slider
+    // moves only the active Z-axis Target's heights, not the surroundings.
+    const useMul  = isPrimary ? heightMul : def.defaultMul;
     const colorHex = isPrimary ? def.color : def.contextColor;
 
     const res = extrudeLayer(def, data, useMode, useMul);
