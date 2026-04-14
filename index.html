@@ -863,23 +863,27 @@ async function precomputeExternalAttrs(data) {
   }
 }
 
-// Reset to PLATEAU original-data defaults
-// - Z-axis Mode: first option of current target (height for buildings, width for roads)
-// - Height Scale: 1.0
+// Reset to PLATEAU original-data defaults (true proportional view)
+// - Z-axis Mode: first option of current target (height/width = raw measured)
+// - Height Scale: matches XY scale so buildings render at TRUE proportions
+//   (1m height = scale*1 mm, e.g. ≈0.079mm at 1:13). This matches how
+//   PLATEAU's standard 3D city viewer displays the data — no artistic
+//   exaggeration of building heights.
 // - Layers: each layer's enabledByDefault state
 window.resetToDefaults = function() {
-  // Reset Z-axis Mode to first (height/width = raw measured value)
   const modes = MODES_BY_TARGET[currentTarget] || BUILDING_MODES;
   if (modes[0]) {
     modeSelect.value = modes[0].id;
     document.getElementById('modeDesc').textContent = modes[0].desc || '';
   }
 
-  // Reset height scale to 1.0
-  document.getElementById('heightScale').value = 1.0;
-  document.getElementById('scaleNum').value = 1.0;
+  // True-proportional height = same as XY scale (data.scale, e.g. 0.079)
+  const area = document.getElementById('area').value;
+  const anyData = Object.values(dataCache[area] || {}).find(d => d);
+  const dataScale = anyData?.scale || 1.0;
+  document.getElementById('heightScale').value = dataScale;
+  document.getElementById('scaleNum').value = dataScale;
 
-  // Reset all layer visibility to defaults
   for (const def of LAYER_DEFS) {
     if (layerAvailable[def.id] === false) {
       layerVisible[def.id] = false;
@@ -891,7 +895,6 @@ window.resetToDefaults = function() {
   }
   updateLayerAvailabilityUI();
 
-  // Re-render with defaults; loadAreaLayers handles lazy-loading of newly enabled layers
   loadAreaLayers();
 };
 
