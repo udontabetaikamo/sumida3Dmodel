@@ -73,9 +73,6 @@ button:disabled { opacity: 0.4; cursor: wait; }
   <select id="mode"></select>
   <div id="modeDesc" class="mode-desc"></div>
 
-  <label style="margin-top:14px;border-top:1px solid #333;padding-top:10px;">Layers（重ねて表示するレイヤー）</label>
-  <div id="layerToggles" style="display:flex;flex-direction:column;gap:4px;font-size:12px;"></div>
-
   <label>Height Scale</label>
   <div style="display:flex;gap:8px;align-items:center;">
     <input type="range" id="heightScale" min="0.01" max="5" step="0.01" value="1.0" style="flex:1;">
@@ -83,6 +80,9 @@ button:disabled { opacity: 0.4; cursor: wait; }
       style="width:70px;background:#2a2a4a;color:#fff;border:1px solid #444;border-radius:6px;padding:4px 6px;font-size:13px;text-align:right;">
     <span style="font-size:12px;color:#888;">x</span>
   </div>
+
+  <label style="margin-top:14px;border-top:1px solid #333;padding-top:10px;">Layers（重ねて表示するレイヤー）</label>
+  <div id="layerToggles" style="display:flex;flex-direction:column;gap:4px;font-size:12px;"></div>
 
   <div id="info">
     <div class="stat"><span id="statCountLabel">Buildings</span><span class="val" id="statCount">-</span></div>
