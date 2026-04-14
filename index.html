@@ -41,6 +41,12 @@ button:disabled { opacity: 0.4; cursor: wait; }
   background: #1a1a2e; z-index: 100; font-size: 18px; color: #7dd3fc;
 }
 .mode-desc { font-size: 11px; color: #888; margin-top: 4px; line-height: 1.4; }
+.layer-row { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 0; }
+.layer-row input[type=checkbox] { width: auto; cursor: pointer; }
+.layer-row .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.layer-row .name { flex: 1; }
+.layer-row.disabled { color: #555; cursor: not-allowed; }
+.layer-row .badge { font-size: 10px; color: #888; padding-left: 4px; }
 </style>
 </head>
 <body>
@@ -57,15 +63,18 @@ button:disabled { opacity: 0.4; cursor: wait; }
     <option value="654655">押上駅周辺</option>
   </select>
 
-  <label>Target</label>
+  <label>Z-axis Target（高さで表現する対象）</label>
   <select id="target">
-    <option value="buildings">Buildings（建物だけ）</option>
-    <option value="roads">Roads（道路だけ）</option>
+    <option value="buildings">Buildings（建物）</option>
+    <option value="roads">Roads（道路）</option>
   </select>
 
   <label>Z-axis Mode</label>
   <select id="mode"></select>
   <div id="modeDesc" class="mode-desc"></div>
+
+  <label style="margin-top:14px;border-top:1px solid #333;padding-top:10px;">Layers（重ねて表示するレイヤー）</label>
+  <div id="layerToggles" style="display:flex;flex-direction:column;gap:4px;font-size:12px;"></div>
 
   <label>Height Scale</label>
   <div style="display:flex;gap:8px;align-items:center;">
@@ -130,10 +139,49 @@ const ROAD_MODES = [
 
 const MODES_BY_TARGET = { buildings: BUILDING_MODES, roads: ROAD_MODES };
 
+// Layer definitions — every udx folder we plan to support.
+// `kind`: how to render the JSON (polygon | ribbon | flat-poly | water | dem)
+// `color`: primary brand color when this layer is the Z-axis Target
+// `contextColor`: muted color when shown as a non-Target context layer
+// `defaultMode`: Z mode used when rendered as context (no UI control)
+// `defaultMul`: height multiplier when context (typically <1 to flatten)
+// `enabledByDefault`: whether the checkbox starts on
+// `targetable`: whether this layer can be the Z-axis Target
+const LAYER_DEFS = [
+  { id: 'buildings', label: '建物 (bldg)',          kind: 'polygon',   color: 0x4488cc, contextColor: 0x556677, defaultMode: 'height', defaultMul: 1.0, enabledByDefault: true,  targetable: true },
+  { id: 'roads',     label: '道路 (tran)',          kind: 'ribbon',    color: 0xd97757, contextColor: 0x554a45, defaultMode: 'width',  defaultMul: 0.5, enabledByDefault: true,  targetable: true },
+  { id: 'bridges',   label: '橋梁 (brid)',          kind: 'polygon',   color: 0x9ca3af, contextColor: 0x6b6b7a, defaultMode: 'flat10', defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+  { id: 'water',     label: '水部 (wtr)',           kind: 'water',     color: 0x4b6fa3, contextColor: 0x3a4f73, defaultMode: 'flat',   defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+  { id: 'dem',       label: '地形 (dem)',           kind: 'dem',       color: 0x4a4233, contextColor: 0x3a342a, defaultMode: 'flat',   defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+  { id: 'fld',       label: '河川浸水想定 (fld)',    kind: 'flat-poly', color: 0x60a5fa, contextColor: 0x4e7fb8, defaultMode: 'depth',  defaultMul: 0.3, enabledByDefault: true,  targetable: false },
+  { id: 'htd',       label: '高潮浸水想定 (htd)',    kind: 'flat-poly', color: 0xf472b6, contextColor: 0xb55a8c, defaultMode: 'depth',  defaultMul: 0.3, enabledByDefault: true,  targetable: false },
+  { id: 'tnm',       label: '津波浸水想定 (tnm)',    kind: 'flat-poly', color: 0x06b6d4, contextColor: 0x0a8aa0, defaultMode: 'depth',  defaultMul: 0.3, enabledByDefault: true,  targetable: false },
+  { id: 'ifld',      label: '内水氾濫想定 (ifld)',   kind: 'flat-poly', color: 0x8b5cf6, contextColor: 0x6a4ab8, defaultMode: 'depth',  defaultMul: 0.3, enabledByDefault: true,  targetable: false },
+  { id: 'urf',       label: '都市計画決定 (urf)',    kind: 'flat-poly', color: 0xfacc15, contextColor: 0xa18810, defaultMode: 'flat',   defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+  { id: 'luse',      label: '土地利用 (luse)',       kind: 'flat-poly', color: 0x84cc16, contextColor: 0x5e8e10, defaultMode: 'flat',   defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+  { id: 'veg',       label: '植生 (veg)',           kind: 'polygon',   color: 0x22c55e, contextColor: 0x17703b, defaultMode: 'flat',   defaultMul: 1.0, enabledByDefault: true,  targetable: false },
+];
+const LAYER_BY_ID = Object.fromEntries(LAYER_DEFS.map(l => [l.id, l]));
+
 const BASE_THICKNESS = 1.0;
 let scene, camera, renderer, controls, buildingsGroup, basePlate;
-let currentData = null;
+let currentTarget = 'buildings';
 let exporter;
+
+// Cache: dataCache[area][layerId] = data | null (null = confirmed missing)
+const dataCache = {};
+// Visibility per layer (mirrors checkbox state)
+const layerVisible = Object.fromEntries(LAYER_DEFS.map(l => [l.id, l.enabledByDefault]));
+// Tracks which layers are confirmed missing for the current area, to grey out checkboxes
+const layerAvailable = {};
+
+function getCachedData(area, layerId) {
+  return dataCache[area]?.[layerId];
+}
+function setCachedData(area, layerId, data) {
+  if (!dataCache[area]) dataCache[area] = {};
+  dataCache[area][layerId] = data;
+}
 
 // Init Three.js
 const canvas = document.getElementById('canvas');
@@ -177,6 +225,65 @@ function populateModeDropdown(target) {
   document.getElementById('modeDesc').textContent = modes[0]?.desc || '';
 }
 populateModeDropdown('buildings');
+
+// Build layer toggle UI
+function buildLayerToggles() {
+  const container = document.getElementById('layerToggles');
+  container.innerHTML = '';
+  for (const def of LAYER_DEFS) {
+    const row = document.createElement('label');
+    row.className = 'layer-row';
+    row.dataset.layerId = def.id;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = layerVisible[def.id];
+    cb.dataset.layerId = def.id;
+    cb.addEventListener('change', onLayerToggle);
+
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = '#' + def.color.toString(16).padStart(6, '0');
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = def.label;
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+
+    row.appendChild(cb);
+    row.appendChild(sw);
+    row.appendChild(name);
+    row.appendChild(badge);
+    container.appendChild(row);
+  }
+}
+
+function updateLayerAvailabilityUI() {
+  document.querySelectorAll('.layer-row').forEach(row => {
+    const id = row.dataset.layerId;
+    const avail = layerAvailable[id];
+    const cb = row.querySelector('input[type=checkbox]');
+    const badge = row.querySelector('.badge');
+    if (avail === false) {
+      row.classList.add('disabled');
+      cb.disabled = true;
+      cb.checked = false;
+      badge.textContent = '(JSON未生成)';
+    } else {
+      row.classList.remove('disabled');
+      cb.disabled = false;
+      badge.textContent = '';
+    }
+    // Mark target layer
+    if (id === currentTarget) {
+      badge.textContent = (badge.textContent ? badge.textContent + ' ' : '') + '★Target';
+    }
+  });
+}
+
+buildLayerToggles();
 
 // Z-value calculation (mirrors Python get_z_value)
 function getZValue(attrs, mode) {
@@ -301,48 +408,93 @@ function getRoadZValue(attrs, mode) {
   }
 }
 
-// Build 3D geometry — dispatches based on data type
-function buildScene(data, mode, heightMul) {
+// Build 3D scene — renders all visible layers, with the Target layer using the active Z mode
+// `layersData`: { [layerId]: data }
+function buildScene(layersData, target, mode, heightMul) {
   // Clear old
   while (buildingsGroup.children.length) {
     const c = buildingsGroup.children[0];
     c.geometry?.dispose();
-    c.material?.dispose();
     buildingsGroup.remove(c);
   }
   if (basePlate) {
     basePlate.geometry?.dispose();
-    basePlate.material?.dispose();
     scene.remove(basePlate);
   }
 
-  if (data.type === 'roads' || data.roads) {
-    buildRoadsScene(data, mode, heightMul);
-  } else {
-    buildBuildingsScene(data, mode, heightMul);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let primaryRes = null;
+  let primaryDef = null;
+
+  for (const def of LAYER_DEFS) {
+    if (!layerVisible[def.id]) continue;
+    const data = layersData[def.id];
+    if (!data) continue;
+
+    const isPrimary = def.id === target;
+    const useMode = isPrimary ? mode : def.defaultMode;
+    const useMul  = isPrimary ? heightMul : def.defaultMul;
+    const colorHex = isPrimary ? def.color : def.contextColor;
+
+    const res = extrudeLayer(def, data, useMode, useMul);
+    if (res.geos.length > 0) {
+      const merged = mergeGeometries(res.geos);
+      const mat = new THREE.MeshPhongMaterial({ color: colorHex, flatShading: true, side: THREE.DoubleSide });
+      buildingsGroup.add(new THREE.Mesh(merged, mat));
+      res.geos.forEach(g => g.dispose());
+    }
+    if (isFinite(res.minX)) {
+      minX = Math.min(minX, res.minX); minY = Math.min(minY, res.minY);
+      maxX = Math.max(maxX, res.maxX); maxY = Math.max(maxY, res.maxY);
+    }
+    if (isPrimary) {
+      primaryRes = res;
+      primaryDef = def;
+    }
+  }
+
+  // If target layer hidden/missing, fall back to first visible layer for stats
+  if (!primaryRes) {
+    primaryRes = { heights: [], count: 0, countLabel: 'Items', minX, minY, maxX, maxY };
+  }
+
+  // Use any visible layer's data for ref scale / range (all share coordinate frame)
+  const refData = Object.values(layersData).find(d => d) || { scale: 1, range_m: [100, 100] };
+  finalizeScene(primaryRes, minX, minY, maxX, maxY, refData, mode, target === 'roads');
+}
+
+// Dispatch by layer kind
+function extrudeLayer(def, data, mode, mul) {
+  switch (def.kind) {
+    case 'polygon':   return extrudePolygons(data, def, mode, mul);
+    case 'ribbon':    return extrudeRoads(data, mode, mul);
+    case 'flat-poly': return extrudePolygons(data, def, mode, mul);
+    case 'water':     return extrudePolygons(data, def, mode, mul);
+    case 'dem':       return extrudeDem(data, mul);
+    default:          return { geos: [], heights: [], minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, count: 0, countLabel: def.label };
   }
 }
 
-function buildBuildingsScene(data, mode, heightMul) {
+// Generic polygon-list extruder (used for buildings, bridges, water, fld/htd/tnm/ifld, urf, luse, veg)
+// Data shape: { ...meta, items: [{ fp: [[x,y],...], a: {...} }, ...] }   OR legacy buildings shape
+function extrudePolygons(data, def, mode, mul) {
   const scale = data.scale;
-  const buildings = data.buildings;
-
-  const mat = new THREE.MeshPhongMaterial({
-    color: 0x4488cc,
-    flatShading: true,
-    side: THREE.DoubleSide,
-  });
-
+  const items = data.buildings || data.items || data[def.id] || [];
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let heights = [];
-  const allGeometries = [];
+  const heights = [];
+  const geos = [];
 
-  for (const b of buildings) {
-    const fp = b.fp;
-    if (fp.length < 3) continue;
+  for (const it of items) {
+    const fp = it.fp;
+    if (!fp || fp.length < 3) continue;
 
-    const zVal = getZValue(b.a, mode) * heightMul;
-    const hmm = Math.max(zVal, 0.4);
+    let zVal;
+    if (def.id === 'buildings') {
+      zVal = getZValue(it.a || {}, mode);
+    } else {
+      zVal = getGenericZ(it.a || {}, mode, def);
+    }
+    const hmm = Math.max(zVal * mul, 0.4);
     heights.push(hmm);
 
     const pts2d = fp.map(p => [p[0] * scale, p[1] * scale]);
@@ -358,25 +510,59 @@ function buildBuildingsScene(data, mode, heightMul) {
 
     const geo = new THREE.ExtrudeGeometry(shape, { depth: hmm, bevelEnabled: false });
     geo.translate(0, 0, BASE_THICKNESS);
-    allGeometries.push(geo);
+    geos.push(geo);
   }
-
-  finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, 'Buildings', buildings.length);
+  return { geos, heights, minX, minY, maxX, maxY, count: items.length, countLabel: def.label };
 }
 
-function buildRoadsScene(data, mode, heightMul) {
+// DEM (terrain) extruder — expects {grid: [[z,...]], origin_x, origin_y, cell_m}
+function extrudeDem(data, mul) {
+  const scale = data.scale;
+  const grid = data.grid;
+  if (!grid || !grid.length) {
+    return { geos: [], heights: [], minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, count: 0, countLabel: '地形 (dem)' };
+  }
+  const ox = (data.origin_x || 0) * scale;
+  const oy = (data.origin_y || 0) * scale;
+  const cell = (data.cell_m || 5) * scale;
+  const rows = grid.length, cols = grid[0].length;
+  const w = cols * cell, h = rows * cell;
+  const geo = new THREE.PlaneGeometry(w, h, cols - 1, rows - 1);
+  const pos = geo.attributes.position;
+  const baseElev = data.base_elev || 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const z = ((grid[r][c] || baseElev) - baseElev) * scale * mul;
+      pos.setZ(r * cols + c, z);
+    }
+  }
+  geo.computeVertexNormals();
+  geo.translate(ox + w / 2, oy + h / 2, BASE_THICKNESS);
+  return {
+    geos: [geo], heights: [0], minX: ox, minY: oy, maxX: ox + w, maxY: oy + h,
+    count: rows * cols, countLabel: '地形 (dem) cells'
+  };
+}
+
+// Generic Z value for non-buildings layers (depth, flat, etc.)
+function getGenericZ(attrs, mode, def) {
+  switch (mode) {
+    case 'depth': {
+      const d = attrs.depth ?? attrs.flood_depth ?? attrs.hightide_depth ?? 0;
+      return d > 0 ? Math.min(d * 6, 25) : 0.6;
+    }
+    case 'flat':   return 0.6;
+    case 'flat10': return 10;
+    default:       return 4;
+  }
+}
+
+function extrudeRoads(data, mode, heightMul) {
   const scale = data.scale;
   const roads = data.roads;
-
-  const mat = new THREE.MeshPhongMaterial({
-    color: 0xd97757,
-    flatShading: true,
-    side: THREE.DoubleSide,
-  });
-
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let heights = [];
-  const allGeometries = [];
+  const heights = [];
+  const geos = [];
   let segCount = 0;
 
   for (const r of roads) {
@@ -384,25 +570,20 @@ function buildRoadsScene(data, mode, heightMul) {
     if (!line || line.length < 2) continue;
 
     const widthM = (r.a?.width != null && r.a.width > 0) ? r.a.width : 4.0;
-    const halfW = (widthM / 2) * scale; // mm
+    const halfW = (widthM / 2) * scale;
 
     const zVal = getRoadZValue(r.a || {}, mode) * heightMul;
     const hmm = Math.max(zVal, 0.4);
 
-    // Scale polyline to mm
     const pts = line.map(p => [p[0] * scale, p[1] * scale]);
 
     for (let i = 0; i < pts.length - 1; i++) {
-      const p1 = pts[i];
-      const p2 = pts[i + 1];
-      const dx = p2[0] - p1[0];
-      const dy = p2[1] - p1[1];
+      const p1 = pts[i], p2 = pts[i + 1];
+      const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
       const len = Math.sqrt(dx * dx + dy * dy);
       if (len < 1e-4) continue;
-      const nx = -dy / len;
-      const ny = dx / len;
+      const nx = -dy / len, ny = dx / len;
 
-      // 4 corners of the segment ribbon (mm)
       const c1 = [p1[0] + nx * halfW, p1[1] + ny * halfW];
       const c2 = [p2[0] + nx * halfW, p2[1] + ny * halfW];
       const c3 = [p2[0] - nx * halfW, p2[1] - ny * halfW];
@@ -422,26 +603,17 @@ function buildRoadsScene(data, mode, heightMul) {
 
       const geo = new THREE.ExtrudeGeometry(shape, { depth: hmm, bevelEnabled: false });
       geo.translate(0, 0, BASE_THICKNESS);
-      allGeometries.push(geo);
+      geos.push(geo);
       heights.push(hmm);
       segCount++;
     }
   }
-
-  finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, 'Segments', segCount);
+  return { geos, heights, minX, minY, maxX, maxY, count: segCount, countLabel: 'Segments' };
 }
 
-function finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data, mode, countLabel, count) {
-  if (allGeometries.length > 0) {
-    const merged = mergeGeometries(allGeometries);
-    const mesh = new THREE.Mesh(merged, mat);
-    buildingsGroup.add(mesh);
-    allGeometries.forEach(g => g.dispose());
-  }
-
+function finalizeScene(primaryRes, minX, minY, maxX, maxY, data, mode, primaryIsRoads) {
   const scale = data.scale;
 
-  // Base plate (use bounds, fallback to data.range_m if empty)
   if (!isFinite(minX)) {
     const w = (data.range_m?.[0] || 100) * scale;
     const h = (data.range_m?.[1] || 100) * scale;
@@ -456,20 +628,19 @@ function finalizeScene(allGeometries, mat, heights, minX, minY, maxX, maxY, data
   basePlate.position.set((minX + maxX) / 2, (minY + maxY) / 2, BASE_THICKNESS / 2);
   scene.add(basePlate);
 
-  // Stats
-  heights.sort((a, b) => a - b);
+  // Stats based on primary layer only
+  const heights = primaryRes.heights.slice().sort((a, b) => a - b);
   const maxH = heights[heights.length - 1] || 0;
   const medH = heights[Math.floor(heights.length / 2)] || 0;
-  document.getElementById('statCountLabel').textContent = countLabel;
-  document.getElementById('statCount').textContent = count.toLocaleString();
+  document.getElementById('statCountLabel').textContent = primaryRes.countLabel;
+  document.getElementById('statCount').textContent = primaryRes.count.toLocaleString();
   document.getElementById('statXY').textContent = `${(data.range_m[0] * scale).toFixed(0)} x ${(data.range_m[1] * scale).toFixed(0)} mm`;
   document.getElementById('statMaxH').textContent = `${(maxH + BASE_THICKNESS).toFixed(1)} mm`;
   document.getElementById('statMedH').textContent = `${(medH + BASE_THICKNESS).toFixed(1)} mm`;
   document.getElementById('statScale').textContent = `1:${Math.round(1 / scale)}`;
 
-  // Show "Max excl. Skytree" only for buildings + 押上 + height mode
   const isOshiage = document.getElementById('area').value === '654655';
-  const isHeight = mode === 'height' && countLabel === 'Buildings';
+  const isHeight = mode === 'height' && !primaryIsRoads;
   const row2 = document.getElementById('statMaxH2Row');
   if (isOshiage && isHeight && maxH > 200) {
     const filtered = heights.filter(h => h < 200);
@@ -525,51 +696,103 @@ function mergeGeometries(geometries) {
   return merged;
 }
 
-// Load data — builds URL from area code + target
-async function loadArea() {
+// Load every layer that is checked & not yet cached for this area.
+// Returns { [layerId]: data } including only the layers currently visible AND available.
+async function loadAreaLayers() {
   const area = document.getElementById('area').value;
-  const target = document.getElementById('target').value;
-  const url = `${target}_${area}.json`;
-
   document.getElementById('loading').style.display = 'flex';
-  document.getElementById('loading').textContent = `Loading ${url}...`;
+  document.getElementById('loading').textContent = `Loading ${area}...`;
   document.getElementById('dlBtn').disabled = true;
 
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    currentData = await resp.json();
+  // Fetch in parallel for layers not yet known
+  const fetches = [];
+  for (const def of LAYER_DEFS) {
+    if (getCachedData(area, def.id) !== undefined) continue; // already known (data or null)
+    if (!layerVisible[def.id]) continue; // skip hidden layers (lazy load on toggle)
+    const url = `${def.id}_${area}.json`;
+    fetches.push((async () => {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (def.id === 'buildings') await precomputeExternalAttrs(data);
+        setCachedData(area, def.id, data);
+      } catch (e) {
+        setCachedData(area, def.id, null);
+      }
+    })());
+  }
+  await Promise.all(fetches);
 
-    // Mark data type for the dispatcher
-    if (target === 'roads' && !currentData.type) currentData.type = 'roads';
-
-    // Buildings only: pre-compute external data
-    if (target === 'buildings') {
-      await precomputeExternalAttrs(currentData);
-    }
-
-    const mode = document.getElementById('mode').value;
-    const hScale = parseFloat(document.getElementById('heightScale').value);
-    buildScene(currentData, mode, hScale);
-  } catch (e) {
-    const loadingEl = document.getElementById('loading');
-    if (target === 'roads') {
-      loadingEl.innerHTML =
-        `<div style="text-align:center;line-height:1.7;max-width:480px;padding:20px;">` +
-        `<div style="color:#fbbf24;font-size:20px;margin-bottom:8px;">道路データ未生成</div>` +
-        `<div style="font-size:14px;color:#aaa;">` +
-        `<code>${url}</code> が見つかりません。<br>` +
-        `PLATEAU の <code>udx/tran/</code> から JSON を生成するには、<br>` +
-        `<code>tools/build_roads_json.py</code> をローカルで実行してください。<br><br>` +
-        `Target を Buildings に戻すと既存の建物モデルを表示できます。</div></div>`;
+  // Mark availability for UI
+  for (const def of LAYER_DEFS) {
+    const cached = getCachedData(area, def.id);
+    if (cached === undefined) {
+      // not loaded yet (hidden) — leave availability untouched (assume OK)
+      if (layerAvailable[def.id] === undefined) layerAvailable[def.id] = true;
     } else {
-      loadingEl.textContent = `Error: ${e.message}. Make sure ${url} is in the same directory.`;
+      layerAvailable[def.id] = cached !== null;
+      if (cached === null) layerVisible[def.id] = false;
     }
+  }
+  updateLayerAvailabilityUI();
+
+  // Build scene with all visible+available layers
+  const visibleData = {};
+  for (const def of LAYER_DEFS) {
+    if (layerVisible[def.id] && getCachedData(area, def.id)) {
+      visibleData[def.id] = getCachedData(area, def.id);
+    }
+  }
+
+  // If target layer missing, gracefully fall back
+  if (!visibleData[currentTarget]) {
+    document.getElementById('loading').innerHTML =
+      `<div style="text-align:center;line-height:1.7;max-width:520px;padding:20px;">` +
+      `<div style="color:#fbbf24;font-size:18px;margin-bottom:8px;">Target レイヤー未生成</div>` +
+      `<div style="font-size:13px;color:#aaa;">` +
+      `<code>${currentTarget}_${area}.json</code> が見つかりません。<br>` +
+      `他のレイヤーは表示できますが、Z軸操作対象は未生成です。<br>` +
+      `Z-axis Target を別のレイヤーに切り替えるか、対応するJSONを生成してください。</div></div>`;
+    document.getElementById('dlBtn').disabled = true;
     return;
   }
 
+  const mode = document.getElementById('mode').value;
+  const hScale = parseFloat(document.getElementById('heightScale').value);
+  buildScene(visibleData, currentTarget, mode, hScale);
+
   document.getElementById('loading').style.display = 'none';
   document.getElementById('dlBtn').disabled = false;
+}
+
+// Convenience alias for the original entry point name
+async function loadArea() { return loadAreaLayers(); }
+
+function rerender() {
+  const area = document.getElementById('area').value;
+  const visibleData = {};
+  for (const def of LAYER_DEFS) {
+    if (layerVisible[def.id] && getCachedData(area, def.id)) {
+      visibleData[def.id] = getCachedData(area, def.id);
+    }
+  }
+  if (!visibleData[currentTarget]) return;
+  const mode = document.getElementById('mode').value;
+  const hScale = parseFloat(document.getElementById('heightScale').value);
+  buildScene(visibleData, currentTarget, mode, hScale);
+}
+
+async function onLayerToggle(e) {
+  const id = e.target.dataset.layerId;
+  layerVisible[id] = e.target.checked;
+  // Lazy load if newly enabled
+  const area = document.getElementById('area').value;
+  if (e.target.checked && getCachedData(area, id) === undefined) {
+    await loadAreaLayers();
+  } else {
+    rerender();
+  }
 }
 
 // Pre-compute external data for each building (shelter distance, land price, population)
@@ -660,35 +883,40 @@ window.downloadSTL = function() {
 };
 
 // Event listeners
-document.getElementById('area').addEventListener('change', () => loadArea());
+document.getElementById('area').addEventListener('change', () => {
+  // New area = wipe cached availability, force reload
+  for (const key of Object.keys(layerAvailable)) delete layerAvailable[key];
+  loadArea();
+});
 document.getElementById('target').addEventListener('change', () => {
-  const target = document.getElementById('target').value;
-  populateModeDropdown(target);
+  currentTarget = document.getElementById('target').value;
+  populateModeDropdown(currentTarget);
+  // Auto-enable target layer if it was hidden
+  if (!layerVisible[currentTarget] && layerAvailable[currentTarget] !== false) {
+    layerVisible[currentTarget] = true;
+    const cb = document.querySelector(`.layer-row[data-layer-id="${currentTarget}"] input`);
+    if (cb) cb.checked = true;
+  }
+  updateLayerAvailabilityUI();
   loadArea();
 });
 document.getElementById('mode').addEventListener('change', () => {
-  if (!currentData) return;
+  rerender();
   const mode = document.getElementById('mode').value;
-  const hScale = parseFloat(document.getElementById('heightScale').value);
-  buildScene(currentData, mode, hScale);
-  // Update description
-  const target = document.getElementById('target').value;
-  const modeInfo = (MODES_BY_TARGET[target] || BUILDING_MODES).find(m => m.id === mode);
+  const modeInfo = (MODES_BY_TARGET[currentTarget] || BUILDING_MODES).find(m => m.id === mode);
   document.getElementById('modeDesc').textContent = modeInfo?.desc || '';
 });
 document.getElementById('heightScale').addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   document.getElementById('scaleNum').value = v;
-  if (!currentData) return;
-  buildScene(currentData, document.getElementById('mode').value, v);
+  rerender();
 });
 document.getElementById('scaleNum').addEventListener('change', (e) => {
   let v = parseFloat(e.target.value);
   if (isNaN(v) || v < 0.01) v = 0.01;
   e.target.value = v;
   document.getElementById('heightScale').value = Math.min(v, 5);
-  if (!currentData) return;
-  buildScene(currentData, document.getElementById('mode').value, v);
+  rerender();
 });
 
 window.addEventListener('resize', () => {

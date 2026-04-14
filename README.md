@@ -12,11 +12,34 @@ GISコミュニティフォーラム マップギャラリー（ESRIジャパン
 
 ## 機能
 
-- **Target切り替え**: Buildings（建物だけ）/ Roads（道路だけ）モデル
+- **Z-axis Target**: 高さで表現する対象レイヤーを選択（Buildings / Roads）
+- **マルチレイヤー表示**: PLATEAU の全12レイヤー（建物・道路・橋梁・水部・地形・浸水想定など）を**チェックボックスで重ね合わせ表示／非表示**切り替え
 - **15種類の建物Z軸モード** + **7種類の道路Z軸モード**
 - **高さ倍率**をスライダー・数値入力でリアルタイム調整
 - **STLダウンロード** - 現在の設定でそのままBambu Lab等のスライサーに読み込める
 - 2エリア対応（錦糸町駅周辺 / 押上駅周辺）
+
+## レイヤー一覧
+
+| ID | Label | データ種別 | 状態 |
+|---|---|---|---|
+| buildings | 建物 (bldg) | polygon | ✓ 実装済 |
+| roads | 道路 (tran) | ribbon | ✓ 実装済 |
+| bridges | 橋梁 (brid) | polygon | UI のみ（JSON 生成スクリプト要） |
+| water | 水部 (wtr) | polygon | UI のみ |
+| dem | 地形 (dem) | mesh | UI のみ |
+| fld | 河川浸水想定 | flat-poly | UI のみ |
+| htd | 高潮浸水想定 | flat-poly | UI のみ |
+| tnm | 津波浸水想定 | flat-poly | UI のみ |
+| ifld | 内水氾濫想定 | flat-poly | UI のみ |
+| urf | 都市計画決定 | flat-poly | UI のみ |
+| luse | 土地利用 | flat-poly | UI のみ |
+| veg | 植生 | polygon | UI のみ |
+
+JSON が未生成のレイヤーは自動的にチェックボックスがグレーアウトされ、
+`(JSON未生成)` バッジが表示されます。チェック ON のレイヤーが存在すれば
+そのレイヤーがコンテキストとして重ね描画され、Target レイヤーは Z軸モードに
+従って高さ表現されます。
 
 ## Z軸モード一覧
 
