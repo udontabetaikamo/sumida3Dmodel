@@ -73,16 +73,38 @@ JSON が未生成のレイヤーは自動的にチェックボックスがグレ
 | Daily Traffic Volume | 24h交通量 | 道路交通センサス N01（要マージ） |
 | Uniform Height | 全道路均一高（ネットワーク俯瞰用） | — |
 
-道路モードを使うには `tools/build_roads_json.py` をローカル実行して
-`roads_634635.json` / `roads_654655.json` を生成してください：
+## レイヤーJSON生成スクリプト
+
+各 PLATEAU udx モジュールから JSON を生成するスクリプトを `tools/` に配置しています。
+すべて **buildings_<area>.json から座標基準を引き継ぐ** ため、座標系がずれません。
 
 ```bash
+# 道路 (tran)
 python3 tools/build_roads_json.py \
-  --tran-dir "/path/to/13107_sumida-ku.../udx/tran" \
-  --buildings-json buildings_634635.json \
-  --area 634635 \
+  --tran-dir "/path/to/.../udx/tran" \
+  --buildings-json buildings_634635.json --area 634635 \
   --output roads_634635.json
+
+# 橋梁 (brid)
+python3 tools/build_bridges_json.py \
+  --brid-dir "/path/to/.../udx/brid" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output bridges_634635.json
+
+# 水部 (wtr)
+python3 tools/build_water_json.py \
+  --wtr-dir "/path/to/.../udx/wtr" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output water_634635.json
+
+# 地形 (dem) — TIN を 10m グリッドへリサンプリング
+python3 tools/build_dem_json.py \
+  --dem-dir "/path/to/.../udx/dem" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output dem_634635.json
 ```
+
+押上エリアも同様に `--area 654655 --buildings-json buildings_654655.json --output <id>_654655.json` で実行してください。
 
 ## 使用データ
 

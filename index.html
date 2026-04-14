@@ -515,7 +515,8 @@ function extrudePolygons(data, def, mode, mul) {
   return { geos, heights, minX, minY, maxX, maxY, count: items.length, countLabel: def.label };
 }
 
-// DEM (terrain) extruder — expects {grid: [[z,...]], origin_x, origin_y, cell_m}
+// DEM (terrain) extruder — expects {grid: [[z,...]], origin_x, origin_y, cell_m, base_elev}
+// Python grid uses r=0 at minY (bottom), Three.js PlaneGeometry uses r=0 at maxY (top), so flip.
 function extrudeDem(data, mul) {
   const scale = data.scale;
   const grid = data.grid;
@@ -530,9 +531,12 @@ function extrudeDem(data, mul) {
   const geo = new THREE.PlaneGeometry(w, h, cols - 1, rows - 1);
   const pos = geo.attributes.position;
   const baseElev = data.base_elev || 0;
+  // Amplify terrain visibility (墨田区は標高差 0〜5m 程度なのでデフォルト10倍)
+  const elevAmp = (data.elev_amp || 10) * scale * mul;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const z = ((grid[r][c] || baseElev) - baseElev) * scale * mul;
+      const gridR = rows - 1 - r; // Y flip
+      const z = ((grid[gridR][c] || baseElev) - baseElev) * elevAmp;
       pos.setZ(r * cols + c, z);
     }
   }
