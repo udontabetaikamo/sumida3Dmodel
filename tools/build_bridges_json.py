@@ -22,18 +22,20 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _plateau_common import (
     bbox_from_buildings_json, collect_polygons, in_bbox, iter_local,
-    localname, parse_xml, polygon_centroid_z, polygon_to_xy,
+    localname, parse_xml, polygon_to_xy,
 )
 
 
 def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
-    """1ファイルから Bridge を抽出して [{fp, a}, ...] を返す。"""
+    """1ファイルから Bridge を抽出して [{fp, a}, ...] を返す。
+
+    bbox判定は「全ポリゴンの全頂点のうち1つでもbbox内」とゆるくする。
+    フットプリントは最大面積の水平面 (Z分散が小) を選ぶ。"""
     out = []
     bridges = list(iter_local(root, 'Bridge'))
     stats['bridge_elems'] += len(bridges)
 
-    for bridge in bridges:
-        # 名称(あれば)
+    for bi, bridge in enumerate(bridges):
         name = None
         for el in bridge:
             if localname(el.tag) == 'name' and el.text:
@@ -45,22 +47,59 @@ def extract_bridges(root, ref_lon, ref_lat, bbox_m, stats):
             stats['no_geom'] += 1
             continue
 
-        # 最も低い (Z 平均が最小の) 面をフットプリントとみなす
-        rated = []
-        for ext, _ in polys:
-            z = polygon_centroid_z(ext)
-            rated.append((z if z is not None else float('inf'), ext))
-        rated.sort(key=lambda x: x[0])
-        best_ext = rated[0][1]
+        # 全ポリゴンを local meters に変換し、頂点 1 つでも bbox に入るかチェック
+        polys_xy = []
+        all_in_bbox = False
+        all_xy_pts = []
+        for ext, _holes in polys:
+            xy = polygon_to_xy(ext, ref_lon, ref_lat)
+            polys_xy.append((xy, ext))
+            for p in xy:
+                all_xy_pts.append(p)
+                if in_bbox(p, bbox_m):
+                    all_in_bbox = True
 
-        fp_xy = polygon_to_xy(best_ext, ref_lon, ref_lat)
-        if not any(in_bbox(p, bbox_m) for p in fp_xy):
+        # デバッグ: 最初の数件の bbox を出力
+        if stats['printed_debug'] < 3 and all_xy_pts:
+            xs = [p[0] for p in all_xy_pts]
+            ys = [p[1] for p in all_xy_pts]
+            print(f"  [DEBUG bridge#{bi}] vertices_x={min(xs):.0f}..{max(xs):.0f}, "
+                  f"vertices_y={min(ys):.0f}..{max(ys):.0f}, polys={len(polys)}, name={name}")
+            stats['printed_debug'] += 1
+
+        if not all_in_bbox:
             stats['out_of_bbox'] += 1
             continue
 
-        out.append({'fp': fp_xy, 'a': {'name': name} if name else {}})
+        # フットプリント選択: 各ポリゴンに「面積 / Z分散」スコアを計算し、最大を選ぶ
+        # 水平な大きい面 = 橋の上面 or 下面 を優先
+        best_score = -1
+        best_xy = None
+        for xy, ext in polys_xy:
+            area = abs(_polygon_area_xy(xy))
+            zs = [p[2] for p in ext if len(p) >= 3]
+            z_var = (max(zs) - min(zs)) if zs else 0
+            score = area / (z_var + 0.5)  # 水平&大きい程高得点
+            if score > best_score:
+                best_score = score
+                best_xy = xy
+
+        if best_xy is None or len(best_xy) < 3:
+            continue
+
+        out.append({'fp': best_xy, 'a': {'name': name} if name else {}})
 
     return out
+
+
+def _polygon_area_xy(pts):
+    s = 0.0
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        s += (x1 * y2 - x2 * y1)
+    return s / 2.0
 
 
 def main():
@@ -90,7 +129,7 @@ def main():
 
     print(f"\nProcessing {len(files)} brid file(s)...")
     items = []
-    stats = {'bridge_elems': 0, 'no_geom': 0, 'out_of_bbox': 0}
+    stats = {'bridge_elems': 0, 'no_geom': 0, 'out_of_bbox': 0, 'printed_debug': 0}
     for fp in files:
         root = parse_xml(fp)
         if root is None:
