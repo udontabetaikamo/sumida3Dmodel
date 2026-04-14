@@ -12,7 +12,8 @@ GISコミュニティフォーラム マップギャラリー（ESRIジャパン
 
 ## 機能
 
-- **15種類のZ軸モード**を切り替えて3Dプレビュー
+- **Target切り替え**: Buildings（建物だけ）/ Roads（道路だけ）モデル
+- **15種類の建物Z軸モード** + **7種類の道路Z軸モード**
 - **高さ倍率**をスライダー・数値入力でリアルタイム調整
 - **STLダウンロード** - 現在の設定でそのままBambu Lab等のスライサーに読み込める
 - 2エリア対応（錦糸町駅周辺 / 押上駅周辺）
@@ -36,6 +37,29 @@ GISコミュニティフォーラム マップギャラリー（ESRIジャパン
 | Shelter Distance | 避難所までの距離 | 墨田区オープンデータ |
 | Land Price | 地価公示 | 国土数値情報 L01 (2025) |
 | Population Density | 人口密度 | 国土数値情報 500mメッシュ (2020) |
+
+## 道路モード（Target = Roads）
+
+| モード | Z軸の意味 | データソース |
+|--------|----------|-------------|
+| Road Width | 道路幅員（広いほど高い） | PLATEAU tran |
+| Narrow Road Risk | 狭隘度（4m未満ほど高い／消防車進入困難） | PLATEAU tran |
+| Road Class | 道路種別（国道/都道/区道） | PLATEAU tran |
+| Road Function | 機能区分（車道部/交差部/歩道部） | PLATEAU tran |
+| Emergency Transport Road | 緊急輸送道路指定 | 国土数値情報 N10（要マージ） |
+| Daily Traffic Volume | 24h交通量 | 道路交通センサス N01（要マージ） |
+| Uniform Height | 全道路均一高（ネットワーク俯瞰用） | — |
+
+道路モードを使うには `tools/build_roads_json.py` をローカル実行して
+`roads_634635.json` / `roads_654655.json` を生成してください：
+
+```bash
+python3 tools/build_roads_json.py \
+  --tran-dir "/path/to/13107_sumida-ku.../udx/tran" \
+  --buildings-json buildings_634635.json \
+  --area 634635 \
+  --output roads_634635.json
+```
 
 ## 使用データ
 
