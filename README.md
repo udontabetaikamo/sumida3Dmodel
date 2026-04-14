@@ -12,11 +12,34 @@ GISコミュニティフォーラム マップギャラリー（ESRIジャパン
 
 ## 機能
 
-- **Target切り替え**: Buildings（建物だけ）/ Roads（道路だけ）モデル
+- **Z-axis Target**: 高さで表現する対象レイヤーを選択（Buildings / Roads）
+- **マルチレイヤー表示**: PLATEAU の全12レイヤー（建物・道路・橋梁・水部・地形・浸水想定など）を**チェックボックスで重ね合わせ表示／非表示**切り替え
 - **15種類の建物Z軸モード** + **7種類の道路Z軸モード**
 - **高さ倍率**をスライダー・数値入力でリアルタイム調整
 - **STLダウンロード** - 現在の設定でそのままBambu Lab等のスライサーに読み込める
 - 2エリア対応（錦糸町駅周辺 / 押上駅周辺）
+
+## レイヤー一覧
+
+| ID | Label | データ種別 | 状態 |
+|---|---|---|---|
+| buildings | 建物 (bldg) | polygon | ✓ 実装済 |
+| roads | 道路 (tran) | ribbon | ✓ 実装済 |
+| bridges | 橋梁 (brid) | polygon | UI のみ（JSON 生成スクリプト要） |
+| water | 水部 (wtr) | polygon | UI のみ |
+| dem | 地形 (dem) | mesh | UI のみ |
+| fld | 河川浸水想定 | flat-poly | UI のみ |
+| htd | 高潮浸水想定 | flat-poly | UI のみ |
+| tnm | 津波浸水想定 | flat-poly | UI のみ |
+| ifld | 内水氾濫想定 | flat-poly | UI のみ |
+| urf | 都市計画決定 | flat-poly | UI のみ |
+| luse | 土地利用 | flat-poly | UI のみ |
+| veg | 植生 | polygon | UI のみ |
+
+JSON が未生成のレイヤーは自動的にチェックボックスがグレーアウトされ、
+`(JSON未生成)` バッジが表示されます。チェック ON のレイヤーが存在すれば
+そのレイヤーがコンテキストとして重ね描画され、Target レイヤーは Z軸モードに
+従って高さ表現されます。
 
 ## Z軸モード一覧
 
@@ -50,16 +73,38 @@ GISコミュニティフォーラム マップギャラリー（ESRIジャパン
 | Daily Traffic Volume | 24h交通量 | 道路交通センサス N01（要マージ） |
 | Uniform Height | 全道路均一高（ネットワーク俯瞰用） | — |
 
-道路モードを使うには `tools/build_roads_json.py` をローカル実行して
-`roads_634635.json` / `roads_654655.json` を生成してください：
+## レイヤーJSON生成スクリプト
+
+各 PLATEAU udx モジュールから JSON を生成するスクリプトを `tools/` に配置しています。
+すべて **buildings_<area>.json から座標基準を引き継ぐ** ため、座標系がずれません。
 
 ```bash
+# 道路 (tran)
 python3 tools/build_roads_json.py \
-  --tran-dir "/path/to/13107_sumida-ku.../udx/tran" \
-  --buildings-json buildings_634635.json \
-  --area 634635 \
+  --tran-dir "/path/to/.../udx/tran" \
+  --buildings-json buildings_634635.json --area 634635 \
   --output roads_634635.json
+
+# 橋梁 (brid)
+python3 tools/build_bridges_json.py \
+  --brid-dir "/path/to/.../udx/brid" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output bridges_634635.json
+
+# 水部 (wtr)
+python3 tools/build_water_json.py \
+  --wtr-dir "/path/to/.../udx/wtr" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output water_634635.json
+
+# 地形 (dem) — TIN を 10m グリッドへリサンプリング
+python3 tools/build_dem_json.py \
+  --dem-dir "/path/to/.../udx/dem" \
+  --buildings-json buildings_634635.json --area 634635 \
+  --output dem_634635.json
 ```
+
+押上エリアも同様に `--area 654655 --buildings-json buildings_654655.json --output <id>_654655.json` で実行してください。
 
 ## 使用データ
 
