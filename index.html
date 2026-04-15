@@ -1004,6 +1004,110 @@ function initPrintBboxFromData() {
 //   - 4 side walls around the (bbox-clipped) grid perimeter
 // Also clamps all Z ≥ BASE_THICKNESS so terrain never dips below ground.
 // `bboxMm`: optional [x0, y0, x1, y1] to restrict the grid to the print area.
+// Sutherland–Hodgman polygon clipping against an axis-aligned bbox (in meters).
+// Takes polygon points [[x,y],...] and returns clipped polygon, or null if empty.
+function clipPolygonToBbox(pts, bboxM) {
+  const [minX, minY, maxX, maxY] = bboxM;
+  // Four clip edges: 0=x>=minX, 1=x<=maxX, 2=y>=minY, 3=y<=maxY
+  const isInside = (p, side) => (
+    side === 0 ? p[0] >= minX :
+    side === 1 ? p[0] <= maxX :
+    side === 2 ? p[1] >= minY :
+                 p[1] <= maxY
+  );
+  const intersect = (p1, p2, side) => {
+    const [x1, y1] = p1, [x2, y2] = p2;
+    let t;
+    if (side === 0)      t = (minX - x1) / (x2 - x1);
+    else if (side === 1) t = (maxX - x1) / (x2 - x1);
+    else if (side === 2) t = (minY - y1) / (y2 - y1);
+    else                 t = (maxY - y1) / (y2 - y1);
+    return [x1 + t * (x2 - x1), y1 + t * (y2 - y1)];
+  };
+  let out = pts.slice();
+  for (let side = 0; side < 4 && out.length > 0; side++) {
+    const input = out;
+    out = [];
+    for (let i = 0; i < input.length; i++) {
+      const cur = input[i];
+      const prev = input[(i - 1 + input.length) % input.length];
+      const curIn = isInside(cur, side);
+      const prevIn = isInside(prev, side);
+      if (curIn) {
+        if (!prevIn) out.push(intersect(prev, cur, side));
+        out.push(cur);
+      } else if (prevIn) {
+        out.push(intersect(prev, cur, side));
+      }
+    }
+  }
+  return out.length >= 3 ? out : null;
+}
+
+// Clip a polyline (open) against the bbox. Returns an array of
+// clipped polylines (a single polyline may enter/exit the bbox
+// multiple times, producing several pieces).
+function clipPolylineToBbox(line, bboxM) {
+  const [minX, minY, maxX, maxY] = bboxM;
+  const inBbox = (p) => p[0] >= minX && p[0] <= maxX && p[1] >= minY && p[1] <= maxY;
+  // Liang–Barsky parameter range for segment p1→p2 clipped to bbox.
+  const segRange = (p1, p2) => {
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    let tMin = 0, tMax = 1;
+    const checks = [
+      [-dx, p1[0] - minX],
+      [ dx, maxX - p1[0]],
+      [-dy, p1[1] - minY],
+      [ dy, maxY - p1[1]],
+    ];
+    for (const [p, q] of checks) {
+      if (p === 0) { if (q < 0) return null; }
+      else {
+        const t = q / p;
+        if (p < 0) { if (t > tMax) return null; if (t > tMin) tMin = t; }
+        else       { if (t < tMin) return null; if (t < tMax) tMax = t; }
+      }
+    }
+    return { tMin, tMax };
+  };
+  const lerp = (p1, p2, t) => [p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])];
+
+  const result = [];
+  let current = [];
+  for (let i = 0; i < line.length; i++) {
+    const p = line[i];
+    const curIn = inBbox(p);
+    if (i === 0) {
+      if (curIn) current.push(p);
+      continue;
+    }
+    const prev = line[i - 1];
+    const prevIn = inBbox(prev);
+    if (curIn && prevIn) {
+      current.push(p);
+    } else if (curIn && !prevIn) {
+      // Enter bbox: clip prev→p at entry point
+      const r = segRange(prev, p);
+      if (r) current.push(lerp(prev, p, r.tMin));
+      current.push(p);
+    } else if (!curIn && prevIn) {
+      // Exit bbox: clip at exit point, close current piece
+      const r = segRange(prev, p);
+      if (r) current.push(lerp(prev, p, r.tMax));
+      if (current.length >= 2) result.push(current);
+      current = [];
+    } else {
+      // Both outside: segment might still cross bbox entirely
+      const r = segRange(prev, p);
+      if (r && r.tMin < r.tMax) {
+        result.push([lerp(prev, p, r.tMin), lerp(prev, p, r.tMax)]);
+      }
+    }
+  }
+  if (current.length >= 2) result.push(current);
+  return result;
+}
+
 function buildSolidDem(data, mul, stride, bboxMm) {
   stride = Math.max(1, stride || 1);
   const scale = data.scale;
@@ -1175,6 +1279,8 @@ window.downloadSTL = function() {
   const area = document.getElementById('area').value;
   const lite = document.getElementById('liteExport')?.checked ?? true;
   const demStride = lite ? 3 : 1;
+  const heightMul = parseFloat(document.getElementById('heightScale').value) || 1.0;
+  const mode = document.getElementById('mode').value;
 
   let bboxMm = null;
   if (printBbox) {
@@ -1183,39 +1289,74 @@ window.downloadSTL = function() {
 
   const exportScene = new THREE.Scene();
 
-  // Build export meshes. DEM is rebuilt as a WATERTIGHT SOLID (top + bottom +
-  // walls) so it seals against the base plate. Other layers are clipped to
-  // the print bbox. Each layer is welded individually (0.01mm tolerance) to
-  // merge coincident vertices at e.g. road-segment junctions — this reduces
-  // non-manifold edges without globally merging all layers (which was
-  // producing unusable STL in practice).
-  buildingsGroup.children.forEach(c => {
-    if (!c.geometry) return;
-    const layerId = c.userData?.layerId;
-    let geo;
-    if (layerId === 'dem') {
-      const demData = getCachedData(area, 'dem');
-      const def = LAYER_BY_ID['dem'];
-      if (demData) {
-        const isPrimary = c.userData?.isPrimary;
-        const heightMul = parseFloat(document.getElementById('heightScale').value) || 1.0;
-        const useMul = isPrimary ? heightMul : def.defaultMul;
-        geo = buildSolidDem(demData, useMul, demStride, bboxMm);
-      } else {
-        geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
-      }
-    } else {
-      geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
+  // Rebuild each visible layer's geometry from SOURCE DATA, pre-clipped to
+  // the print bbox (in meter space). This produces clean geometry that fits
+  // the print area exactly, instead of the previous approach that filtered
+  // triangles at the triangle level (which left overhanging fragments).
+  //   - DEM: buildSolidDem (already bbox-aware, watertight)
+  //   - Roads: clip polylines → rebuild ribbons
+  //   - Polygons (buildings, water, bridges, etc.): clip polygons → extrude
+  for (const def of LAYER_DEFS) {
+    if (!layerVisible[def.id]) continue;
+    const data = getCachedData(area, def.id);
+    if (!data) continue;
+
+    const isPrimary = def.id === currentTarget;
+    const useMode = isPrimary ? mode : def.defaultMode;
+    const useMul  = isPrimary ? heightMul : def.defaultMul;
+    const colorHex = isPrimary ? def.color : def.contextColor;
+    const mat = new THREE.MeshPhongMaterial({ color: colorHex, flatShading: true, side: THREE.DoubleSide });
+
+    // DEM — rebuild solid (already bbox-aware)
+    if (def.kind === 'dem') {
+      const geo = buildSolidDem(data, useMul, demStride, bboxMm);
+      if (geo) exportScene.add(new THREE.Mesh(geo, mat));
+      continue;
     }
-    if (!geo) return;
-    // Per-layer vertex welding to collapse duplicates (e.g. road segment
-    // endpoints that share a position but not a vertex index)
-    try {
-      geo = weldVertices(geo, 0.01);
-    } catch (e) { /* leave geo unchanged if weld fails */ }
-    const mesh = new THREE.Mesh(geo, c.material);
-    exportScene.add(mesh);
-  });
+
+    // Clip source items to bbox (convert mm bbox → meters via data.scale)
+    const bboxM = bboxMm ? [
+      bboxMm[0] / data.scale, bboxMm[1] / data.scale,
+      bboxMm[2] / data.scale, bboxMm[3] / data.scale,
+    ] : null;
+
+    let clippedData = data;
+    if (bboxM) {
+      if (def.kind === 'ribbon') {
+        const newRoads = [];
+        for (const r of (data.roads || [])) {
+          if (!r.line || r.line.length < 2) continue;
+          const parts = clipPolylineToBbox(r.line, bboxM);
+          for (const seg of parts) {
+            if (seg.length >= 2) newRoads.push({ line: seg, a: r.a });
+          }
+        }
+        clippedData = Object.assign({}, data, { roads: newRoads });
+      } else {
+        // polygon / flat-poly / water
+        const items = data.buildings || data.items || [];
+        const newItems = [];
+        for (const it of items) {
+          if (!it.fp || it.fp.length < 3) continue;
+          const clipped = clipPolygonToBbox(it.fp, bboxM);
+          if (clipped && clipped.length >= 3) newItems.push({ fp: clipped, a: it.a });
+        }
+        if (def.id === 'buildings') {
+          clippedData = Object.assign({}, data, { buildings: newItems });
+        } else {
+          clippedData = Object.assign({}, data, { items: newItems });
+        }
+      }
+    }
+
+    const res = extrudeLayer(def, clippedData, useMode, useMul);
+    if (res.geos.length === 0) continue;
+
+    let merged = mergeGeometries(res.geos);
+    try { merged = weldVertices(merged, 0.01); } catch (e) { /* keep un-welded */ }
+    exportScene.add(new THREE.Mesh(merged, mat));
+    res.geos.forEach(g => g.dispose());
+  }
 
   // Base plate sized exactly to the print area
   if (bboxMm) {
@@ -1236,7 +1377,6 @@ window.downloadSTL = function() {
   const blob = new Blob([result], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const mode = document.getElementById('mode').value;
   const hScale = document.getElementById('heightScale').value;
   const target = document.getElementById('target').value;
   a.href = url;
