@@ -1179,12 +1179,12 @@ window.downloadSTL = function() {
 
   const exportScene = new THREE.Scene();
 
-  // Build export geos for each layer. DEM is rebuilt as a WATERTIGHT SOLID
-  // (top + bottom + walls) so it seals against the base plate — no gaps
-  // between layers when 3D printing. Also clamps Z ≥ BASE_THICKNESS so
-  // terrain can't sink below ground. Lite mode uses stride=3 for 1/9
-  // triangles on DEM.
-  const exportGeos = [];
+  // Build export meshes. DEM is rebuilt as a WATERTIGHT SOLID (top + bottom +
+  // walls) so it seals against the base plate. Other layers are clipped to
+  // the print bbox. Each layer is welded individually (0.01mm tolerance) to
+  // merge coincident vertices at e.g. road-segment junctions — this reduces
+  // non-manifold edges without globally merging all layers (which was
+  // producing unusable STL in practice).
   buildingsGroup.children.forEach(c => {
     if (!c.geometry) return;
     const layerId = c.userData?.layerId;
@@ -1203,7 +1203,14 @@ window.downloadSTL = function() {
     } else {
       geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
     }
-    if (geo) exportGeos.push(geo);
+    if (!geo) return;
+    // Per-layer vertex welding to collapse duplicates (e.g. road segment
+    // endpoints that share a position but not a vertex index)
+    try {
+      geo = weldVertices(geo, 0.01);
+    } catch (e) { /* leave geo unchanged if weld fails */ }
+    const mesh = new THREE.Mesh(geo, c.material);
+    exportScene.add(mesh);
   });
 
   // Base plate sized exactly to the print area
@@ -1213,25 +1220,13 @@ window.downloadSTL = function() {
     const cx = (bboxMm[0] + bboxMm[2]) / 2;
     const cy = (bboxMm[1] + bboxMm[3]) / 2;
     const baseGeo = new THREE.BoxGeometry(bw, bh, BASE_THICKNESS);
-    baseGeo.translate(cx, cy, BASE_THICKNESS / 2);
-    exportGeos.push(baseGeo);
+    const baseMat = new THREE.MeshPhongMaterial({ color: 0x333344, flatShading: true });
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    baseMesh.position.set(cx, cy, BASE_THICKNESS / 2);
+    exportScene.add(baseMesh);
   } else if (basePlate) {
-    const bg = basePlate.geometry.clone();
-    bg.applyMatrix4(basePlate.matrixWorld);
-    exportGeos.push(bg);
+    exportScene.add(basePlate.clone());
   }
-
-  // Combine into one geometry + weld coincident vertices to heal
-  // non-manifold edges from road-segment junctions, clipping cuts, etc.
-  // Without this, slicers report "960 non-manifold edges" and refuse to slice.
-  let mergedGeo = mergeGeometries(exportGeos);
-  try {
-    mergedGeo = weldVertices(mergedGeo, 0.01); // 0.01mm tolerance
-  } catch (e) {
-    console.warn('Weld failed, exporting un-welded mesh:', e);
-  }
-  const exportMesh = new THREE.Mesh(mergedGeo, new THREE.MeshBasicMaterial());
-  exportScene.add(exportMesh);
 
   const result = exporter.parse(exportScene, { binary: true });
   const blob = new Blob([result], { type: 'application/octet-stream' });
