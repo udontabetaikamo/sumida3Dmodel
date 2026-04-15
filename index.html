@@ -1028,8 +1028,13 @@ function buildSolidDem(data, mul, stride, bboxMm) {
   const baseElev = data.base_elev || 0;
   const elevAmp = (data.elev_amp || 10) * scale * mul;
   const bottomZ = BASE_THICKNESS;
+  // Minimum DEM thickness (mm). Without this, flat cells have top=bottom=1
+  // which creates zero-volume (degenerate) mesh regions that slicers flag as
+  // "empty layer" / "faulty mesh". 0.4mm matches the other layers' minimum.
+  const MIN_THICKNESS = 0.4;
 
-  // Top Z per cell, clamped so terrain never sinks below base plate
+  // Top Z per cell. Clamped so DEM never sinks below base plate AND always
+  // has at least MIN_THICKNESS above the bottom to avoid degenerate mesh.
   const topZ = [];
   for (let r = 0; r < rows; r++) {
     const row = [];
@@ -1038,7 +1043,7 @@ function buildSolidDem(data, mul, stride, bboxMm) {
       const gridC = Math.min(origCols - 1, (cStart + c) * stride);
       const raw = data.grid[gridR]?.[gridC];
       const dz = ((raw != null ? raw : baseElev) - baseElev) * elevAmp;
-      row.push(Math.max(bottomZ, bottomZ + dz));
+      row.push(Math.max(bottomZ + MIN_THICKNESS, bottomZ + dz));
     }
     topZ.push(row);
   }
