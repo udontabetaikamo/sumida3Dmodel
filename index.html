@@ -993,9 +993,124 @@ function initPrintBboxFromData() {
   setPrintBbox(w, h, 0, 0);
 }
 
+// Build a WATERTIGHT solid DEM for STL export:
+//   - Top = terrain heightmap (downsampled by stride)
+//   - Bottom = flat at BASE_THICKNESS (top of base plate, fills the gap)
+//   - 4 side walls around the (bbox-clipped) grid perimeter
+// Also clamps all Z ≥ BASE_THICKNESS so terrain never dips below ground.
+// `bboxMm`: optional [x0, y0, x1, y1] to restrict the grid to the print area.
+function buildSolidDem(data, mul, stride, bboxMm) {
+  stride = Math.max(1, stride || 1);
+  const scale = data.scale;
+  const origRows = data.grid.length;
+  const origCols = data.grid[0].length;
+  const origCell = (data.cell_m || 5) * scale;
+  const cell = origCell * stride;
+  const origOx = (data.origin_x || 0) * scale;
+  const origOy = (data.origin_y || 0) * scale;
+
+  const dsRows = Math.max(2, Math.ceil(origRows / stride));
+  const dsCols = Math.max(2, Math.ceil(origCols / stride));
+
+  // Constrain the downsampled grid to the print bbox (if given)
+  let rStart = 0, rEnd = dsRows, cStart = 0, cEnd = dsCols;
+  if (bboxMm) {
+    rStart = Math.max(0, Math.floor((bboxMm[1] - origOy) / cell));
+    rEnd   = Math.min(dsRows, Math.ceil((bboxMm[3] - origOy) / cell) + 1);
+    cStart = Math.max(0, Math.floor((bboxMm[0] - origOx) / cell));
+    cEnd   = Math.min(dsCols, Math.ceil((bboxMm[2] - origOx) / cell) + 1);
+  }
+  const rows = rEnd - rStart, cols = cEnd - cStart;
+  if (rows < 2 || cols < 2) return null;
+
+  const ox = origOx + cStart * cell;
+  const oy = origOy + rStart * cell;
+  const baseElev = data.base_elev || 0;
+  const elevAmp = (data.elev_amp || 10) * scale * mul;
+  const bottomZ = BASE_THICKNESS;
+
+  // Top Z per cell, clamped so terrain never sinks below base plate
+  const topZ = [];
+  for (let r = 0; r < rows; r++) {
+    const row = [];
+    for (let c = 0; c < cols; c++) {
+      const gridR = Math.min(origRows - 1, (rStart + r) * stride);
+      const gridC = Math.min(origCols - 1, (cStart + c) * stride);
+      const raw = data.grid[gridR]?.[gridC];
+      const dz = ((raw != null ? raw : baseElev) - baseElev) * elevAmp;
+      row.push(Math.max(bottomZ, bottomZ + dz));
+    }
+    topZ.push(row);
+  }
+
+  const positions = [];
+  const indices = [];
+  const add = (x, y, z) => { const i = positions.length / 3; positions.push(x, y, z); return i; };
+
+  // Top + bottom grids
+  const topIdx = [], botIdx = [];
+  for (let r = 0; r < rows; r++) {
+    const tr = [], br = [];
+    for (let c = 0; c < cols; c++) {
+      const x = ox + c * cell, y = oy + r * cell;
+      tr.push(add(x, y, topZ[r][c]));
+      br.push(add(x, y, bottomZ));
+    }
+    topIdx.push(tr);
+    botIdx.push(br);
+  }
+
+  // Top triangles (normals +Z, CCW from above)
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const a = topIdx[r][c], b = topIdx[r][c + 1];
+      const cc = topIdx[r + 1][c + 1], d = topIdx[r + 1][c];
+      indices.push(a, b, cc,  a, cc, d);
+    }
+  }
+  // Bottom triangles (normals -Z, reversed winding)
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const a = botIdx[r][c], b = botIdx[r][c + 1];
+      const cc = botIdx[r + 1][c + 1], d = botIdx[r + 1][c];
+      indices.push(a, cc, b,  a, d, cc);
+    }
+  }
+  // South wall (r=0, normal -Y)
+  for (let c = 0; c < cols - 1; c++) {
+    const tL = topIdx[0][c], tR = topIdx[0][c + 1];
+    const bL = botIdx[0][c], bR = botIdx[0][c + 1];
+    indices.push(tL, bL, bR,  tL, bR, tR);
+  }
+  // North wall (r=rows-1, normal +Y)
+  for (let c = 0; c < cols - 1; c++) {
+    const tL = topIdx[rows - 1][c], tR = topIdx[rows - 1][c + 1];
+    const bL = botIdx[rows - 1][c], bR = botIdx[rows - 1][c + 1];
+    indices.push(tL, tR, bR,  tL, bR, bL);
+  }
+  // West wall (c=0, normal -X)
+  for (let r = 0; r < rows - 1; r++) {
+    const tS = topIdx[r][0], tN = topIdx[r + 1][0];
+    const bS = botIdx[r][0], bN = botIdx[r + 1][0];
+    indices.push(tS, bS, bN,  tS, bN, tN);
+  }
+  // East wall (c=cols-1, normal +X)
+  for (let r = 0; r < rows - 1; r++) {
+    const tS = topIdx[r][cols - 1], tN = topIdx[r + 1][cols - 1];
+    const bS = botIdx[r][cols - 1], bN = botIdx[r + 1][cols - 1];
+    indices.push(tS, tN, bN,  tS, bN, bS);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // Clip a BufferGeometry to a 2D bbox (mm coords). Triangles are kept if any
 // vertex falls inside the bbox; triangles entirely outside are removed.
-// This makes STL exports honor the print area without losing partial roads.
+// Also drops any triangle entirely below Z=0 (below ground / base plate bottom).
 function clipGeometryToBbox(geometry, bboxMm) {
   const positions = geometry.attributes.position.array;
   const normals = geometry.attributes.normal?.array;
@@ -1005,13 +1120,17 @@ function clipGeometryToBbox(geometry, bboxMm) {
     const x = positions[vi * 3], y = positions[vi * 3 + 1];
     return x >= x0 && x <= x1 && y >= y0 && y <= y1;
   };
+  // Keep triangle only if any vertex is in XY bbox AND any vertex is at Z >= 0
+  // (drops bits that poke below ground, e.g. stray DEM dips from legacy export path)
+  const aboveGround = (vi) => positions[vi * 3 + 2] >= 0;
 
   const newGeo = new THREE.BufferGeometry();
   if (indices) {
     const kept = [];
     for (let i = 0; i < indices.length; i += 3) {
       const a = indices[i], b = indices[i + 1], c = indices[i + 2];
-      if (inBbox(a) || inBbox(b) || inBbox(c)) {
+      if ((inBbox(a) || inBbox(b) || inBbox(c)) &&
+          (aboveGround(a) || aboveGround(b) || aboveGround(c))) {
         kept.push(a, b, c);
       }
     }
@@ -1025,7 +1144,8 @@ function clipGeometryToBbox(geometry, bboxMm) {
     const keptNor = [];
     for (let t = 0; t < nTris; t++) {
       const aIn = inBbox(t * 3), bIn = inBbox(t * 3 + 1), cIn = inBbox(t * 3 + 2);
-      if (aIn || bIn || cIn) {
+      const aAG = aboveGround(t * 3), bAG = aboveGround(t * 3 + 1), cAG = aboveGround(t * 3 + 2);
+      if ((aIn || bIn || cIn) && (aAG || bAG || cAG)) {
         for (let j = 0; j < 9; j++) keptPos.push(positions[t * 9 + j]);
         if (normals) for (let j = 0; j < 9; j++) keptNor.push(normals[t * 9 + j]);
       }
@@ -1053,22 +1173,23 @@ window.downloadSTL = function() {
 
   const exportScene = new THREE.Scene();
 
-  // Build export meshes. For DEM in lite mode, rebuild at coarser grid.
+  // Build export meshes. DEM is rebuilt as a WATERTIGHT SOLID (top + bottom +
+  // walls) so it seals against the base plate — no gaps between layers when
+  // 3D printing. Also clamps Z ≥ BASE_THICKNESS so terrain can't sink below
+  // ground. Lite mode uses stride=3 for 1/9 triangles on DEM.
   buildingsGroup.children.forEach(c => {
     if (!c.geometry) return;
     const layerId = c.userData?.layerId;
     let geo;
-    if (layerId === 'dem' && lite) {
-      // Rebuild DEM at coarser resolution from source data
+    if (layerId === 'dem') {
       const demData = getCachedData(area, 'dem');
       const def = LAYER_BY_ID['dem'];
       if (demData) {
         const isPrimary = c.userData?.isPrimary;
         const heightMul = parseFloat(document.getElementById('heightScale').value) || 1.0;
         const useMul = isPrimary ? heightMul : def.defaultMul;
-        const res = extrudeDem(demData, useMul, demStride);
-        geo = res.geos[0];
-        if (bboxMm && geo) geo = clipGeometryToBbox(geo, bboxMm);
+        // Solid DEM already bbox-constrained internally — no extra clip needed
+        geo = buildSolidDem(demData, useMul, demStride, bboxMm);
       } else {
         geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
       }
