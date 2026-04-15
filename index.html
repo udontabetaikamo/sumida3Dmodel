@@ -109,6 +109,10 @@ button:disabled { opacity: 0.4; cursor: wait; }
   </div>
 
   <button id="resetBtn" onclick="resetToDefaults()" style="background:linear-gradient(135deg,#475569,#64748b);margin-top:10px;">Reset（PLATEAU元データに戻す）</button>
+  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:10px;margin-bottom:0;font-size:12px;color:#ccc;">
+    <input type="checkbox" id="liteExport" checked style="width:auto;cursor:pointer;">
+    <span>STL を軽量化（地形を粗く、1/9 サイズ）</span>
+  </label>
   <button id="dlBtn" onclick="downloadSTL()">Download STL</button>
 </div>
 
@@ -470,7 +474,10 @@ function buildScene(layersData, target, mode, heightMul) {
     if (res.geos.length > 0) {
       const merged = mergeGeometries(res.geos);
       const mat = new THREE.MeshPhongMaterial({ color: colorHex, flatShading: true, side: THREE.DoubleSide });
-      buildingsGroup.add(new THREE.Mesh(merged, mat));
+      const mesh = new THREE.Mesh(merged, mat);
+      mesh.userData.layerId = def.id;
+      mesh.userData.isPrimary = isPrimary;
+      buildingsGroup.add(mesh);
       res.geos.forEach(g => g.dispose());
     }
     if (isFinite(res.minX)) {
@@ -548,26 +555,33 @@ function extrudePolygons(data, def, mode, mul) {
 
 // DEM (terrain) extruder — expects {grid: [[z,...]], origin_x, origin_y, cell_m, base_elev}
 // Python grid uses r=0 at minY (bottom), Three.js PlaneGeometry uses r=0 at maxY (top), so flip.
-function extrudeDem(data, mul) {
+function extrudeDem(data, mul, stride) {
   const scale = data.scale;
   const grid = data.grid;
   if (!grid || !grid.length) {
     return { geos: [], heights: [], minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, count: 0, countLabel: '地形 (dem)' };
   }
+  stride = Math.max(1, stride || 1); // 1 = no downsample, 3 = every 3rd cell
   const ox = (data.origin_x || 0) * scale;
   const oy = (data.origin_y || 0) * scale;
-  const cell = (data.cell_m || 5) * scale;
-  const rows = grid.length, cols = grid[0].length;
+  const origCell = (data.cell_m || 5) * scale;
+  const cell = origCell * stride; // downsampled cell size
+  const origRows = grid.length, origCols = grid[0].length;
+  // Number of cells in downsampled grid (round up so we cover the full area)
+  const rows = Math.max(2, Math.ceil(origRows / stride));
+  const cols = Math.max(2, Math.ceil(origCols / stride));
   const w = cols * cell, h = rows * cell;
   const geo = new THREE.PlaneGeometry(w, h, cols - 1, rows - 1);
   const pos = geo.attributes.position;
   const baseElev = data.base_elev || 0;
-  // Amplify terrain visibility (墨田区は標高差 0〜5m 程度なのでデフォルト10倍)
   const elevAmp = (data.elev_amp || 10) * scale * mul;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const gridR = rows - 1 - r; // Y flip
-      const z = ((grid[gridR][c] || baseElev) - baseElev) * elevAmp;
+      // Source grid index (clamp to bounds)
+      const srcR = Math.min(origRows - 1, r * stride);
+      const srcC = Math.min(origCols - 1, c * stride);
+      const gridR = origRows - 1 - srcR; // Y flip
+      const z = ((grid[gridR][srcC] || baseElev) - baseElev) * elevAmp;
       pos.setZ(r * cols + c, z);
     }
   }
@@ -1023,11 +1037,15 @@ function clipGeometryToBbox(geometry, bboxMm) {
 }
 
 // STL Download — clipped to user-defined Print Area (printBbox)
+// Lite export (default on): rebuild DEM at 1/3 resolution (9× fewer triangles)
+// to keep file size manageable while retaining all visible layers.
 window.downloadSTL = function() {
   if (!buildingsGroup.children.length) return;
 
-  // Use the current print bbox (set by the Print Area inputs)
   const area = document.getElementById('area').value;
+  const lite = document.getElementById('liteExport')?.checked ?? true;
+  const demStride = lite ? 3 : 1;
+
   let bboxMm = null;
   if (printBbox) {
     bboxMm = [printBbox.x0, printBbox.y0, printBbox.x1, printBbox.y1];
@@ -1035,10 +1053,29 @@ window.downloadSTL = function() {
 
   const exportScene = new THREE.Scene();
 
-  // Clip each mesh to the print bbox
+  // Build export meshes. For DEM in lite mode, rebuild at coarser grid.
   buildingsGroup.children.forEach(c => {
     if (!c.geometry) return;
-    const geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
+    const layerId = c.userData?.layerId;
+    let geo;
+    if (layerId === 'dem' && lite) {
+      // Rebuild DEM at coarser resolution from source data
+      const demData = getCachedData(area, 'dem');
+      const def = LAYER_BY_ID['dem'];
+      if (demData) {
+        const isPrimary = c.userData?.isPrimary;
+        const heightMul = parseFloat(document.getElementById('heightScale').value) || 1.0;
+        const useMul = isPrimary ? heightMul : def.defaultMul;
+        const res = extrudeDem(demData, useMul, demStride);
+        geo = res.geos[0];
+        if (bboxMm && geo) geo = clipGeometryToBbox(geo, bboxMm);
+      } else {
+        geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
+      }
+    } else {
+      geo = bboxMm ? clipGeometryToBbox(c.geometry, bboxMm) : c.geometry.clone();
+    }
+    if (!geo) return;
     const mesh = new THREE.Mesh(geo, c.material);
     exportScene.add(mesh);
   });
